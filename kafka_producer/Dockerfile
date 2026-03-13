@@ -3,10 +3,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y libsnappy-dev g++ && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt .
+COPY kafka_producer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt python-snappy
 
-COPY producer.py .
+COPY common/ /app/common/
+COPY kafka_producer/producer.py .
 
 # Create non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app

@@ -56,6 +56,8 @@ logs/
 htmlcov/
 nosetests.xml
 coverage.xml
+test_output*.txt
+test_api_output*.txt
 
 # OS
 .DS_Store

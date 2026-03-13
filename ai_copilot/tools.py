@@ -7,65 +7,57 @@ that returns structured data the LLM can reason over.
 """
 
 import os
-import logging
-from datetime import datetime
 
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 from langchain_core.tools import tool
 
-logger = logging.getLogger("nexus.copilot.tools")
+from common.logging_utils import get_logger
+from common.db_utils import get_db_config
 
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
+logger = get_logger("nexus.copilot.tools")
+
+# ---------------------------------------------------------------------------
+# Connection pool (thread-safe, enables concurrent queries)
+# ---------------------------------------------------------------------------
+_pool = None
 
 
-def _get_conn():
-    """Get or create a persistent module-level connection with timeout."""
-    global _conn
-    try:
-        if _conn is None or _conn.closed:
-            _conn = psycopg2.connect(
-                host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-                user=PG_USER, password=PG_PASSWORD,
-                connect_timeout=5,  # 5 second timeout
-            )
-            _conn.autocommit = True
-        return _conn
-    except Exception as e:
-        logger.warning("Connection error: %s, creating new connection", e)
-        try:
-            _conn = psycopg2.connect(
-                host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-                user=PG_USER, password=PG_PASSWORD,
-                connect_timeout=5,
-            )
-            _conn.autocommit = True
-        except Exception as retry_err:
-            logger.error("Retry failed: %s", retry_err)
-            raise
-        return _conn
-
-_conn = None
+def _get_pool():
+    """Get or create a module-level connection pool."""
+    global _pool
+    if _pool is None:
+        db_cfg = get_db_config()
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1, maxconn=5, **db_cfg
+        )
+        logger.info("Connection pool created (min=1, max=5)")
+    return _pool
 
 
 def _query(sql: str, params: tuple = ()) -> list[dict]:
-    conn = _get_conn()
+    """Execute a read-only query using a pooled connection."""
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
+        conn.autocommit = True
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
     except psycopg2.OperationalError:
-        # Connection died — reconnect and retry once
-        global _conn
-        _conn = None
-        conn = _get_conn()
+        # Connection died — discard it, get a fresh one, and retry once
+        pool.putconn(conn, close=True)
+        conn = pool.getconn()
+        conn.autocommit = True
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
+    finally:
+        try:
+            pool.putconn(conn)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

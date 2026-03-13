@@ -22,26 +22,11 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, precision_recall_fscore_support
 
-from constants import CATEGORY_MAP, REGION_MAP, FEATURE_COLUMNS
+from common.constants import CATEGORY_MAP, REGION_MAP, FEATURE_COLUMNS
 
-# ---------------------------------------------------------------------------
-# Structured logging
-# ---------------------------------------------------------------------------
-class _JSONFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "ts": self.formatTime(record),
-            "level": record.levelname,
-            "service": "model-trainer",
-            "msg": record.getMessage(),
-        })
+from common.logging_utils import get_logger
 
-logger = logging.getLogger("nexus.trainer")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-_h.setFormatter(_JSONFormatter())
-logger.addHandler(_h)
-logger.propagate = False
+logger = get_logger("nexus.trainer")
 
 DATA_PATH = os.getenv("TRAINING_DATA_PATH", "/app/data/training_data.csv")
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/model/model.json")

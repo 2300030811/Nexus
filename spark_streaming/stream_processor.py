@@ -9,14 +9,12 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, DoubleType,
 )
 
+from common.logging_utils import get_logger
+
 # ---------------------------------------------------------------------------
-# Structured logging
+# Structured logging (via shared utility)
 # ---------------------------------------------------------------------------
-logger = logging.getLogger("nexus.spark")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler()
-logger.addHandler(_h)
-logger.propagate = False
+logger = get_logger("nexus.spark")
 
 # ---------------------------------------------------------------------------
 # Configuration

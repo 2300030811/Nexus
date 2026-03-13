@@ -14,7 +14,6 @@ import signal
 import sys
 import time
 import json
-import logging
 import urllib.request
 
 import psycopg2
@@ -27,36 +26,16 @@ from tools import (
     query_product_order_volume, query_feature_snapshot,
     query_recent_order_trend, query_payment_method_breakdown,
 )
-from prometheus_client import Counter, Histogram, start_http_server
+from common.logging_utils import get_logger
+from common.metrics import (
+    INVESTIGATIONS_TOTAL, INVESTIGATION_ERRORS, LLM_RESPONSE_TIME,
+    REPORTS_SAVED, DB_RECONNECTS, start_metrics_server,
+)
 
 # ---------------------------------------------------------------------------
-# Prometheus metrics
+# Structured logging (via shared utility)
 # ---------------------------------------------------------------------------
-INVESTIGATIONS_TOTAL = Counter("nexus_investigations_total", "Total investigations")
-INVESTIGATION_ERRORS = Counter("nexus_investigation_errors_total", "Failed investigations")
-LLM_RESPONSE_TIME = Histogram("nexus_llm_response_seconds", "LLM response time",
-                              buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0])
-REPORTS_SAVED = Counter("nexus_reports_saved_total", "Reports saved")
-DB_RECONNECTS = Counter("nexus_db_reconnects_total", "DB reconnection attempts")
-
-# ---------------------------------------------------------------------------
-# Structured logging
-# ---------------------------------------------------------------------------
-class _JSONFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "ts": self.formatTime(record),
-            "level": record.levelname,
-            "service": "ai-copilot",
-            "msg": record.getMessage(),
-        })
-
-logger = logging.getLogger("nexus.copilot")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-_h.setFormatter(_JSONFormatter())
-logger.addHandler(_h)
-logger.propagate = False
+logger = get_logger("nexus.copilot")
 
 # ---------------------------------------------------------------------------
 # Global state for graceful shutdown
@@ -373,7 +352,7 @@ def main() -> None:
 
     # Start Prometheus metrics endpoint
     metrics_port = int(os.getenv("METRICS_PORT", "9092"))
-    start_http_server(metrics_port)
+    start_metrics_server(metrics_port)
     logger.info("Prometheus metrics available on port %d", metrics_port)
 
     wait_for_ollama()
@@ -422,7 +401,7 @@ def main() -> None:
                         # Continue to next anomaly instead of crashing
 
         except psycopg2.OperationalError as db_err:
-            DB_RECONNECTS.inc()
+            DB_RECONNECTS.labels(service="ai-copilot").inc()
             logger.error("Lost DB connection, waiting %ds before retry: %s", reconnect_backoff, db_err)
             try:
                 conn.close()

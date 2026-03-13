@@ -13,39 +13,24 @@ import signal
 import sys
 import time
 import uuid
-import logging
 from datetime import datetime, timezone
 
 import psycopg2
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+from common.logging_utils import get_logger
+from common.metrics import (
+    EVENTS_PRODUCED, PRODUCE_ERRORS, SIMULATION_MODE as SIMULATION_GAUGE,
+    start_metrics_server,
+)
+from common.constants import PRODUCTS, REGIONS, PAYMENT_METHODS
+from common.db_utils import get_db_config
 
 # ---------------------------------------------------------------------------
-# Prometheus metrics
+# Structured logging (via shared utility)
 # ---------------------------------------------------------------------------
-EVENTS_PRODUCED = Counter("nexus_events_produced_total", "Total events produced", ["topic"])
-PRODUCE_ERRORS = Counter("nexus_produce_errors_total", "Total produce errors")
-SIMULATION_GAUGE = Gauge("nexus_simulation_mode", "Stockout simulation active")
-
-# ---------------------------------------------------------------------------
-# Structured logging
-# ---------------------------------------------------------------------------
-class _JSONFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "ts": self.formatTime(record),
-            "level": record.levelname,
-            "service": "producer",
-            "msg": record.getMessage(),
-        })
-
-logger = logging.getLogger("nexus.producer")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-_h.setFormatter(_JSONFormatter())
-logger.addHandler(_h)
-logger.propagate = False
+logger = get_logger("nexus.producer")
 
 # ---------------------------------------------------------------------------
 # Global state for graceful shutdown
@@ -74,25 +59,6 @@ PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
 EVENTS_PER_SECOND = float(os.getenv("EVENTS_PER_SECOND", "2.0"))
-
-# ---------------------------------------------------------------------------
-# Product catalog
-# ---------------------------------------------------------------------------
-PRODUCTS = [
-    {"product_id": "SKU-1001", "name": "iPhone 15 Pro",       "category": "Electronics", "base_price": 999.00},
-    {"product_id": "SKU-1002", "name": "MacBook Air M3",      "category": "Electronics", "base_price": 1199.00},
-    {"product_id": "SKU-1003", "name": "AirPods Pro",         "category": "Electronics", "base_price": 249.00},
-    {"product_id": "SKU-1004", "name": "Nike Air Max 90",     "category": "Footwear",    "base_price": 130.00},
-    {"product_id": "SKU-1005", "name": "Levi's 501 Jeans",    "category": "Apparel",     "base_price": 69.50},
-    {"product_id": "SKU-1006", "name": "Instant Pot Duo 7-in-1", "category": "Home",     "base_price": 89.99},
-    {"product_id": "SKU-1007", "name": "Kindle Paperwhite",   "category": "Electronics", "base_price": 139.99},
-    {"product_id": "SKU-1008", "name": "Dyson V15 Vacuum",    "category": "Home",        "base_price": 749.99},
-    {"product_id": "SKU-1009", "name": "Yeti Rambler 26oz",   "category": "Accessories", "base_price": 35.00},
-    {"product_id": "SKU-1010", "name": "Sony WH-1000XM5",     "category": "Electronics", "base_price": 348.00},
-]
-
-REGIONS = ["Delhi", "Maharashtra", "Karnataka", "Tamil Nadu", "West Bengal"]
-PAYMENT_METHODS = ["credit_card", "debit_card", "digital_wallet", "buy_now_pay_later"]
 
 
 def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProducer:
@@ -177,7 +143,7 @@ def generate_order_event(simulate_stockout: bool = False) -> dict:
 def main() -> None:
     # Start Prometheus metrics endpoint
     metrics_port = int(os.getenv("METRICS_PORT", "9090"))
-    start_http_server(metrics_port)
+    start_metrics_server(metrics_port)
     logger.info("Prometheus metrics available on port %d", metrics_port)
 
     producer = create_producer(KAFKA_BROKER)
@@ -204,6 +170,12 @@ def main() -> None:
             def on_error(excp):
                 logger.error("Kafka send failed: %s", excp)
                 PRODUCE_ERRORS.inc()
+                # Dead Letter Queue: preserve failed events
+                try:
+                    with open("dlq_events.jsonl", "a") as f:
+                        f.write(json.dumps(event) + "\n")
+                except Exception as e:
+                    logger.error("Could not write to DLQ: %s", e)
 
             producer.send(KAFKA_TOPIC, key=event_key, value=event).add_callback(on_success).add_errback(on_error)
             EVENTS_PRODUCED.labels(topic=KAFKA_TOPIC).inc()

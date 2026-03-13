@@ -10,6 +10,8 @@ from streamlit_autorefresh import st_autorefresh
 import plotly.express as px
 import plotly.graph_objects as go
 
+from common.db_utils import get_db_config
+
 st.set_page_config(page_title="Nexus Ops Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 # ---------------------------------------------------------------------------
@@ -34,24 +36,16 @@ def check_password():
     return True
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (via shared db_utils)
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
-# Enforce password requirement (fail fast if not provided)
-if not PG_PASSWORD:
-    st.warning("Database password not configured in environment, using default.")
+_db_cfg = get_db_config()
 
 
 @st.cache_resource
 def get_pool():
     return psycopg2.pool.ThreadedConnectionPool(
         minconn=1, maxconn=10,
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASSWORD,
+        **_db_cfg,
     )
 
 def run_query(query: str, params: tuple = ()) -> pd.DataFrame:
@@ -156,15 +150,15 @@ def toggle_simulation(target: bool):
 
 
 
-# Non-blocking auto-refresh every 30s
-st_autorefresh(interval=30000, key="datarefresh")
+# Non-blocking auto-refresh every 5s for near real-time updates
+st_autorefresh(interval=5000, key="datarefresh")
 
 # Header with last updated timestamp
 col_title, col_time = st.columns([3, 1])
 with col_title:
     st.title("Nexus – Autonomous Retail Monitoring")
 with col_time:
-    st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')} (5s polling)")
 
 # Sidebar
 st.sidebar.header("Demo Controls")

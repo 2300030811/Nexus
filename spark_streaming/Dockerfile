@@ -5,7 +5,8 @@ USER root
 # Install Python dependencies
 RUN pip install --no-cache-dir pyspark==3.5.0 psycopg2-binary==2.9.9
 
-COPY stream_processor.py /app/stream_processor.py
+COPY common/ /app/common/
+COPY spark_streaming/stream_processor.py /app/stream_processor.py
 
 WORKDIR /app
 

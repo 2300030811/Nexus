@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Global environment file configuration
 # Note: Docker Compose 2.24+ supports top-level env_file, but for compatibility 
 # we'll add it to services that need it.
@@ -25,6 +23,7 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ZOOKEEPER_SESSION_TIMEOUT_MS: 6000
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
@@ -35,6 +34,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
+    restart: on-failure
 
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
@@ -51,8 +52,8 @@ services:
 
   producer:
     build:
-      context: ../kafka_producer
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: kafka_producer/Dockerfile
     container_name: nexus-producer
     depends_on:
       kafka:
@@ -110,8 +111,8 @@ services:
 
   spark-processor:
     build:
-      context: ../spark_streaming
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: spark_streaming/Dockerfile
     container_name: nexus-spark
     depends_on:
       kafka:
@@ -143,8 +144,8 @@ services:
 
   anomaly-detector:
     build:
-      context: ../ml_models
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: ml_models/Dockerfile
     container_name: nexus-anomaly-detector
     depends_on:
       postgres:
@@ -179,11 +180,11 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q llama3 && echo 'healthy' || exit 1"]
+      test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 120s
     deploy:
       resources:
         limits:
@@ -207,8 +208,8 @@ services:
 
   ai-copilot:
     build:
-      context: ../ai_copilot
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: ai_copilot/Dockerfile
     container_name: nexus-ai-copilot
     depends_on:
       postgres:
@@ -241,8 +242,8 @@ services:
 
   dashboard:
     build:
-      context: ../dashboard
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: dashboard/Dockerfile
     container_name: nexus-dashboard
     depends_on:
       postgres:
@@ -258,6 +259,26 @@ services:
       PG_USER: ${PG_USER}
       PG_PASSWORD: ${PG_PASSWORD}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+    restart: on-failure
+
+  api-service:
+    build:
+      context: ..
+      dockerfile: api_service/Dockerfile
+    container_name: nexus-api-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      PG_HOST: ${PG_HOST}
+      PG_PORT: ${PG_PORT}
+      PG_DB: ${PG_DB}
+      PG_USER: ${PG_USER}
+      PG_PASSWORD: ${PG_PASSWORD}
     restart: on-failure
 
 volumes:

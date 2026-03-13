@@ -116,6 +116,29 @@ cd Nexus/infrastructure
 docker compose up --build
 ```
 
+### Kafka/ZooKeeper Quick Recovery
+
+If Kafka fails on startup with a ZooKeeper `NodeExistsException` (stale `/brokers/ids/1` session), run:
+
+```powershell
+cd Nexus
+powershell -ExecutionPolicy Bypass -File .\infrastructure\scripts\reset-kafka-zk.ps1
+```
+
+Optional full recreate mode:
+
+```powershell
+cd Nexus
+powershell -ExecutionPolicy Bypass -File .\infrastructure\scripts\reset-kafka-zk.ps1 -Full
+```
+
+If you use `make`:
+
+```bash
+make kafka-reset
+make kafka-reset-full
+```
+
 ### Startup Order (automatic via health checks)
 
 1. Zookeeper → Kafka → health check passes

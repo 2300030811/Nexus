@@ -25,22 +25,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, precision_score, recall_score, f1_score
 import psycopg2
 
-# Add parent directory to import common utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from ml_models.constants import (
+from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
     get_hour_factor, get_dow_factor, FEATURE_COLUMNS
 )
 
-# ---------------------------------------------------------------------------
-# Structured logging
-# ---------------------------------------------------------------------------
-logger = logging.getLogger("nexus.retrain")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-logger.addHandler(_h)
-logger.propagate = False
+from common.logging_utils import get_logger
+
+logger = get_logger("nexus.retrain")
 
 # ---------------------------------------------------------------------------
 # Configuration

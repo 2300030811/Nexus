@@ -5,9 +5,34 @@ Pytest configuration and fixtures for Nexus tests.
 import pytest
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 # Add parent directory to path to import modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Mock C-extension and driver dependencies for local test environments
+sys.modules["psycopg2"] = MagicMock()
+sys.modules["psycopg2.extras"] = MagicMock()
+sys.modules["psycopg2.pool"] = MagicMock()
+sys.modules["kafka"] = MagicMock()
+sys.modules["kafka.errors"] = MagicMock()
+sys.modules["langchain_ollama"] = MagicMock()
+sys.modules["langchain_core"] = MagicMock()
+sys.modules["langchain_core.tools"] = MagicMock()
+sys.modules["tools"] = MagicMock()
+sys.modules["prometheus_client"] = MagicMock()
+sys.modules["xgboost"] = MagicMock()
+sys.modules["sklearn"] = MagicMock()
+sys.modules["sklearn.metrics"] = MagicMock()
+sys.modules["pyspark"] = MagicMock()
+sys.modules["pyspark.sql"] = MagicMock()
+sys.modules["pyspark.sql.functions"] = MagicMock()
+sys.modules["pyspark.sql.types"] = MagicMock()
+sys.modules["requests"] = MagicMock()
+sys.modules["streamlit_autorefresh"] = MagicMock()
+sys.modules["plotly"] = MagicMock()
+sys.modules["plotly.express"] = MagicMock()
+sys.modules["plotly.graph_objects"] = MagicMock()
 
 
 @pytest.fixture

@@ -16,17 +16,15 @@ import logging
 import sys
 from datetime import datetime, timedelta
 
-from constants import (
+from common.constants import (
     CATEGORY_MAP, REGION_MAP,
     CATEGORY_BASELINES, REGION_WEIGHTS,
     get_hour_factor, get_dow_factor
 )
 
-logger = logging.getLogger("nexus.datagen")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-logger.addHandler(_h)
-logger.propagate = False
+from common.logging_utils import get_logger
+
+logger = get_logger("nexus.datagen")
 
 CATEGORIES = list(CATEGORY_MAP.keys())
 REGIONS = list(REGION_MAP.keys())

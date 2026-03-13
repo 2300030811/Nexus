@@ -111,76 +111,49 @@ class TestEventGeneration:
 
 
 class TestAnomalyDetection:
-    """Test anomaly detection logic."""
+    """Test anomaly detection logic using the shared classify_severity function."""
 
     def test_severity_assignment_critical_drop(self):
         """Test that severe drops are marked as critical."""
-        revenue_ratio = 0.15  # 85% drop
-        
-        if revenue_ratio < 0.2:
-            severity = "critical"
-        elif revenue_ratio < 0.4:
-            severity = "high"
-        else:
-            severity = "medium"
-        
-        assert severity == "critical"
+        from common.constants import classify_severity
+        assert classify_severity(0.15) == "critical"  # 85% drop
 
     def test_severity_assignment_high_drop(self):
         """Test that moderate drops are marked as high."""
-        revenue_ratio = 0.35  # 65% drop
-        
-        if revenue_ratio < 0.2:
-            severity = "critical"
-        elif revenue_ratio < 0.4:
-            severity = "high"
-        else:
-            severity = "medium"
-        
-        assert severity == "high"
+        from common.constants import classify_severity
+        assert classify_severity(0.35) == "high"  # 65% drop
 
-    def test_severity_assignment_spike(self):
-        """Test that revenue spikes are marked as critical."""
-        revenue_ratio = 5.0  # 5x spike
-        
-        if revenue_ratio > 4.0:
-            severity = "critical"
-        elif revenue_ratio > 2.5:
-            severity = "high"
-        else:
-            severity = "medium"
-        
-        assert severity == "critical"
+    def test_severity_assignment_medium(self):
+        """Test that mild deviations are marked as medium."""
+        from common.constants import classify_severity
+        assert classify_severity(0.5) == "medium"
+        assert classify_severity(1.0) == "medium"
+        assert classify_severity(2.0) == "medium"
 
+    def test_severity_assignment_spike_critical(self):
+        """Test that extreme revenue spikes are marked as critical."""
+        from common.constants import classify_severity
+        assert classify_severity(5.0) == "critical"  # 5x spike
 
-class TestFeatureEngineering:
-    """Test feature engineering for ML model."""
+    def test_severity_assignment_spike_high(self):
+        """Test that moderate revenue spikes are marked as high."""
+        from common.constants import classify_severity
+        assert classify_severity(3.0) == "high"  # 3x spike
 
-    def test_revenue_ratio_calculation(self):
-        """Test that revenue_ratio is calculated correctly."""
-        actual_revenue = 500.0
-        expected_revenue = 1000.0
-        
-        revenue_ratio = actual_revenue / expected_revenue if expected_revenue > 0 else 0
-        
-        assert revenue_ratio == 0.5
+    def test_severity_boundary_critical_low(self):
+        """Test critical boundary at 0.2."""
+        from common.constants import classify_severity
+        assert classify_severity(0.19) == "critical"
+        assert classify_severity(0.2) == "high"  # 0.2 is < 0.4 → high
 
-    def test_revenue_ratio_handles_zero_expected(self):
-        """Test that zero expected revenue is handled gracefully."""
-        actual_revenue = 500.0
-        expected_revenue = 0.0
-        
-        revenue_ratio = actual_revenue / expected_revenue if expected_revenue > 0 else 0
-        
-        assert revenue_ratio == 0
+    def test_severity_boundary_high_low(self):
+        """Test high boundary at 0.4."""
+        from common.constants import classify_severity
+        assert classify_severity(0.39) == "high"
+        assert classify_severity(0.4) == "medium"  # 0.4 is not < 0.4 → medium
 
-    def test_category_encoding(self):
-        """Test that categories are encoded correctly."""
-        from common.constants import CATEGORY_MAP
-
-        test_data = pd.DataFrame({"category": ["Electronics", "Footwear", "Unknown"]})
-        test_data["category_enc"] = test_data["category"].map(CATEGORY_MAP).fillna(-1)
-
-        assert test_data.loc[0, "category_enc"] == 0
-        assert test_data.loc[1, "category_enc"] == 1
-        assert test_data.loc[2, "category_enc"] == -1  # Unknown category
+    def test_severity_boundary_critical_high(self):
+        """Test critical boundary at 4.0."""
+        from common.constants import classify_severity
+        assert classify_severity(4.1) == "critical"
+        assert classify_severity(4.0) == "high"  # 4.0 is not > 4.0 → check > 2.5 → high

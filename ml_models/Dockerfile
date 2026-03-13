@@ -2,14 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY ml_models/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY generate_training_data.py .
-COPY train_model.py .
-COPY detect_anomalies.py .
-COPY constants.py .
-COPY entrypoint.sh .
+COPY common/ /app/common/
+COPY ml_models/generate_training_data.py .
+COPY ml_models/train_model.py .
+COPY ml_models/detect_anomalies.py .
+COPY ml_models/retrain_production_model.py .
+COPY ml_models/entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
 # Directories for data and model artifacts

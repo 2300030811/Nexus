@@ -82,6 +82,9 @@ DOW_FACTORS = [
     1.2,   # Sunday
 ]
 
+# Backward-compatible alias (ml_models used this name)
+DAY_OF_WEEK_FACTORS = DOW_FACTORS
+
 
 def get_hour_factor(hour: int) -> float:
     """Get the hour-of-day multiplier for expected revenue."""
@@ -102,16 +105,41 @@ def get_dow_factor(day_of_week: int) -> float:
 # ---------------------------------------------------------------------------
 
 PRODUCTS = [
-    {"product_id": "SKU-1001", "name": "iPhone 15 Pro",       "category": "Electronics", "base_price": 999.00},
-    {"product_id": "SKU-1002", "name": "MacBook Air M3",      "category": "Electronics", "base_price": 1199.00},
-    {"product_id": "SKU-1003", "name": "AirPods Pro",         "category": "Electronics", "base_price": 249.00},
-    {"product_id": "SKU-1004", "name": "Nike Air Max 90",     "category": "Footwear",    "base_price": 130.00},
-    {"product_id": "SKU-1005", "name": "Levi's 501 Jeans",    "category": "Apparel",     "base_price": 69.50},
-    {"product_id": "SKU-1006", "name": "Instant Pot Duo 7-in-1", "category": "Home",     "base_price": 89.99},
-    {"product_id": "SKU-1007", "name": "Kindle Paperwhite",   "category": "Electronics", "base_price": 139.99},
-    {"product_id": "SKU-1008", "name": "Dyson V15 Vacuum",    "category": "Home",        "base_price": 749.99},
-    {"product_id": "SKU-1009", "name": "Yeti Rambler 26oz",   "category": "Accessories", "base_price": 35.00},
-    {"product_id": "SKU-1010", "name": "Sony WH-1000XM5",     "category": "Electronics", "base_price": 348.00},
+    # Electronics (8 products)
+    {"product_id": "SKU-1001", "name": "iPhone 15 Pro",        "category": "Electronics", "base_price": 999.00},
+    {"product_id": "SKU-1002", "name": "MacBook Air M3",       "category": "Electronics", "base_price": 1199.00},
+    {"product_id": "SKU-1003", "name": "AirPods Pro",          "category": "Electronics", "base_price": 249.00},
+    {"product_id": "SKU-1007", "name": "Kindle Paperwhite",    "category": "Electronics", "base_price": 139.99},
+    {"product_id": "SKU-1010", "name": "Sony WH-1000XM5",      "category": "Electronics", "base_price": 348.00},
+    {"product_id": "SKU-1011", "name": "Samsung Galaxy S24",    "category": "Electronics", "base_price": 899.00},
+    {"product_id": "SKU-1012", "name": "iPad Air M2",           "category": "Electronics", "base_price": 599.00},
+    {"product_id": "SKU-1013", "name": "JBL Flip 6 Speaker",   "category": "Electronics", "base_price": 129.99},
+    # Footwear (5 products)
+    {"product_id": "SKU-1004", "name": "Nike Air Max 90",      "category": "Footwear",    "base_price": 130.00},
+    {"product_id": "SKU-1014", "name": "Adidas Ultraboost 23", "category": "Footwear",    "base_price": 190.00},
+    {"product_id": "SKU-1015", "name": "Puma RS-X Sneakers",   "category": "Footwear",    "base_price": 110.00},
+    {"product_id": "SKU-1016", "name": "New Balance 574",      "category": "Footwear",    "base_price": 89.99},
+    {"product_id": "SKU-1017", "name": "Woodland Leather Boots", "category": "Footwear",  "base_price": 145.00},
+    # Apparel (6 products)
+    {"product_id": "SKU-1005", "name": "Levi's 501 Jeans",     "category": "Apparel",     "base_price": 69.50},
+    {"product_id": "SKU-1018", "name": "Allen Solly Shirt",    "category": "Apparel",     "base_price": 45.00},
+    {"product_id": "SKU-1019", "name": "Peter England Blazer", "category": "Apparel",     "base_price": 120.00},
+    {"product_id": "SKU-1020", "name": "Van Heusen Chinos",    "category": "Apparel",     "base_price": 55.00},
+    {"product_id": "SKU-1021", "name": "US Polo T-Shirt",      "category": "Apparel",     "base_price": 35.00},
+    {"product_id": "SKU-1022", "name": "Raymond Formal Suit",  "category": "Apparel",     "base_price": 250.00},
+    # Home (5 products)
+    {"product_id": "SKU-1006", "name": "Instant Pot Duo 7-in-1", "category": "Home",      "base_price": 89.99},
+    {"product_id": "SKU-1008", "name": "Dyson V15 Vacuum",     "category": "Home",        "base_price": 749.99},
+    {"product_id": "SKU-1023", "name": "Philips Air Fryer",    "category": "Home",        "base_price": 119.99},
+    {"product_id": "SKU-1024", "name": "Prestige Mixer Grinder", "category": "Home",      "base_price": 65.00},
+    {"product_id": "SKU-1025", "name": "Havells Tower Fan",    "category": "Home",        "base_price": 55.00},
+    # Accessories (6 products)
+    {"product_id": "SKU-1009", "name": "Yeti Rambler 26oz",    "category": "Accessories", "base_price": 35.00},
+    {"product_id": "SKU-1026", "name": "Fossil Leather Watch", "category": "Accessories", "base_price": 149.00},
+    {"product_id": "SKU-1027", "name": "Ray-Ban Aviators",     "category": "Accessories", "base_price": 165.00},
+    {"product_id": "SKU-1028", "name": "Skagen Crossbody Bag", "category": "Accessories", "base_price": 89.00},
+    {"product_id": "SKU-1029", "name": "Titan Smart Band",     "category": "Accessories", "base_price": 45.00},
+    {"product_id": "SKU-1030", "name": "Wildcraft Backpack",   "category": "Accessories", "base_price": 55.00},
 ]
 
 REGIONS = ["Delhi", "Maharashtra", "Karnataka", "Tamil Nadu", "West Bengal"]
@@ -135,3 +163,13 @@ SEVERITY_THRESHOLDS = {
     "high": {"min_ratio": 0.0, "max_ratio": 0.4, "spiky_ratio": 2.5},
     "medium": {"min_ratio": 0.0, "max_ratio": float('inf'), "spiky_ratio": float('inf')},
 }
+
+
+def classify_severity(revenue_ratio: float) -> str:
+    """Classify anomaly severity based on revenue ratio. Single source of truth."""
+    if revenue_ratio < 0.2 or revenue_ratio > 4.0:
+        return "critical"
+    elif revenue_ratio < 0.4 or revenue_ratio > 2.5:
+        return "high"
+    else:
+        return "medium"

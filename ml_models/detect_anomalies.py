@@ -10,8 +10,7 @@ import os
 import signal
 import sys
 import time
-import json
-import logging
+import requests
 from datetime import datetime, timezone
 
 import numpy as np
@@ -20,40 +19,20 @@ import xgboost as xgb
 import psycopg2
 from psycopg2.extras import execute_values
 
-from constants import (
+from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
-    FEATURE_COLUMNS, get_hour_factor, get_dow_factor
+    FEATURE_COLUMNS, get_hour_factor, get_dow_factor, classify_severity
 )
-from prometheus_client import Counter, Histogram, start_http_server
+from common.logging_utils import get_logger
+from common.metrics import (
+    SCANS_TOTAL, ANOMALIES_DETECTED, SCORING_LATENCY,
+    WINDOWS_SCORED, DB_RECONNECTS, start_metrics_server,
+)
 
 # ---------------------------------------------------------------------------
-# Prometheus metrics
+# Structured logging (via shared utility)
 # ---------------------------------------------------------------------------
-SCANS_TOTAL = Counter("nexus_anomaly_scans_total", "Total anomaly scans")
-ANOMALIES_DETECTED = Counter("nexus_anomalies_detected_total", "Total anomalies detected", ["severity"])
-SCORING_LATENCY = Histogram("nexus_scoring_latency_seconds", "Scoring batch latency",
-                            buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
-WINDOWS_SCORED = Counter("nexus_windows_scored_total", "Total metric windows scored")
-DB_RECONNECTS = Counter("nexus_db_reconnects_total", "DB reconnection attempts")
-
-# ---------------------------------------------------------------------------
-# Structured logging
-# ---------------------------------------------------------------------------
-class _JSONFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "ts": self.formatTime(record),
-            "level": record.levelname,
-            "service": "anomaly-detector",
-            "msg": record.getMessage(),
-        })
-
-logger = logging.getLogger("nexus.anomaly_detector")
-logger.setLevel(logging.INFO)
-_h = logging.StreamHandler(sys.stdout)
-_h.setFormatter(_JSONFormatter())
-logger.addHandler(_h)
-logger.propagate = False
+logger = get_logger("nexus.anomaly_detector")
 
 # ---------------------------------------------------------------------------
 # Global state for graceful shutdown
@@ -80,6 +59,7 @@ PG_USER = os.getenv("PG_USER", "nexus")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))  # seconds
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/model/model.json")
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 
 # ---------------------------------------------------------------------------
 # Database Functions
@@ -174,17 +154,27 @@ def score_metrics(model: xgb.XGBClassifier, df: pd.DataFrame) -> pd.DataFrame:
     # Only keep predicted anomalies
     anomalies = df[df["anomaly_pred"] == 1].copy()
 
-    # Assign severity based on deviation (vectorized)
-    def severity(ratio):
-        if ratio < 0.2 or ratio > 4.0:
-            return "critical"
-        elif ratio < 0.4 or ratio > 2.5:
-            return "high"
-        else:
-            return "medium"
-    
-    anomalies["severity"] = anomalies["revenue_ratio"].apply(severity)
+    # Use shared severity classification
+    anomalies["severity"] = anomalies["revenue_ratio"].apply(classify_severity)
     return anomalies
+
+
+def send_webhook_alert(row: pd.Series) -> None:
+    """Send an alert to a webhook for critical anomalies."""
+    if not ALERT_WEBHOOK_URL:
+        return
+    try:
+        payload = {
+            "text": f"🚨 *CRITICAL ANOMALY DETECTED*\n"
+                    f"Category: {row['category']} | Region: {row['region']}\n"
+                    f"Actual: ₹{row['total_revenue']:.2f} vs Expected: ₹{row['expected_revenue']:.2f}\n"
+                    f"Score: {row['anomaly_score']:.3f}\n"
+        }
+        resp = requests.post(ALERT_WEBHOOK_URL, json=payload, timeout=5)
+        resp.raise_for_status()
+        logger.info("Alert sent to webhook successfully.")
+    except Exception as e:
+        logger.error("Failed to send webhook alert: %s", e)
 
 
 def write_anomalies(conn, anomalies: pd.DataFrame) -> int:
@@ -223,7 +213,7 @@ def main() -> None:
 
     # Start Prometheus metrics endpoint
     metrics_port = int(os.getenv("METRICS_PORT", "9091"))
-    start_http_server(metrics_port)
+    start_metrics_server(metrics_port)
     logger.info("Prometheus metrics available on port %d", metrics_port)
 
     # Wait for model to be available (training runs first)
@@ -232,6 +222,7 @@ def main() -> None:
         time.sleep(10)
 
     model = load_model(MODEL_PATH)
+    last_model_mtime = os.path.getmtime(MODEL_PATH)
 
     conn = get_connection()
     # ensure_anomalies_table(conn)
@@ -243,6 +234,16 @@ def main() -> None:
     
     while not shutdown_flag:
         try:
+            # Hot model reloading
+            try:
+                current_mtime = os.path.getmtime(MODEL_PATH)
+                if current_mtime > last_model_mtime:
+                    logger.info("Model file changed on disk. Hot-reloading model...")
+                    model = load_model(MODEL_PATH)
+                    last_model_mtime = current_mtime
+            except Exception as e:
+                logger.error("Error during model hot-reload check: %s", e)
+
             scan_count += 1
             SCANS_TOTAL.inc()
             df = fetch_recent_metrics(conn, lookback_minutes=10)
@@ -266,12 +267,14 @@ def main() -> None:
                                       row['severity'].upper(), row['category'],
                                       row['region'], row['total_revenue'],
                                       row['expected_revenue'], row['anomaly_score'])
+                        if row["severity"] == "critical":
+                            send_webhook_alert(row)
                 else:
                     if scan_count % 5 == 0:
                         logger.info("Scan #%d: Scored %d windows – all normal", scan_count, len(df))
 
         except psycopg2.OperationalError as db_err:
-            DB_RECONNECTS.inc()
+            DB_RECONNECTS.labels(service="anomaly-detector").inc()
             logger.error("Lost DB connection, waiting %ds before retry: %s", reconnect_backoff, db_err)
             try:
                 conn.close()

@@ -2,11 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY ai_copilot/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY tools.py .
-COPY copilot.py .
+COPY common/ /app/common/
+COPY ai_copilot/tools.py .
+COPY ai_copilot/copilot.py .
 
 # Create non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app
