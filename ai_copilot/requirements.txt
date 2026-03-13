@@ -1,0 +1,6 @@
+langchain==0.3.7
+langchain-ollama==0.2.0
+langchain-core==0.3.15
+langgraph==0.2.34
+psycopg2-binary==2.9.9
+prometheus-client==0.21.0

@@ -1,0 +1,6 @@
+xgboost==2.0.3
+pandas==2.1.4
+numpy==1.26.3
+scikit-learn==1.4.0
+psycopg2-binary==2.9.9
+prometheus-client==0.21.0
