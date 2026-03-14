@@ -41,7 +41,7 @@ PRODUCE_LATENCY = Histogram(
     buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0],
 )
 
-SIMULATION_MODE = Gauge(
+SIMULATION_ACTIVE = Gauge(
     "nexus_simulation_mode",
     "Whether stockout simulation is active (1=active, 0=off)",
 )

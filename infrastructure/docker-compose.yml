@@ -7,11 +7,8 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: nexus-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
+    networks:
+      - data
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -36,6 +33,9 @@ services:
       retries: 5
       start_period: 20s
     restart: on-failure
+    networks:
+      - data
+      - backend
 
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
@@ -49,6 +49,9 @@ services:
       kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --partitions 6 --replication-factor 1 --topic order_events
       echo 'Topic order_events created with 6 partitions for parallel processing.'
       "
+    networks:
+      - data
+      - backend
 
   producer:
     build:
@@ -69,9 +72,11 @@ services:
       PG_USER: ${PG_USER}
       PG_PASSWORD: ${PG_PASSWORD}
       METRICS_PORT: "9090"
-    ports:
-      - "9090:9090"
+    # ports:
+    #   - "9090:9090"
     restart: on-failure
+    networks:
+      - backend
     deploy:
       resources:
         limits:
@@ -94,12 +99,15 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ../data_warehouse/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ../data_warehouse/migrations:/docker-entrypoint-initdb.d/migrations:ro
+      - ../data_warehouse/run_migrations.sh:/docker-entrypoint-initdb.d/00_run_migrations.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - data
     deploy:
       resources:
         limits:
@@ -108,6 +116,24 @@ services:
         reservations:
           cpus: "1"
           memory: 1G
+
+  partition-cron:
+    image: postgres:16-alpine
+    container_name: nexus-partition-cron
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: [../.env]
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "while true; do
+        PGPASSWORD=$$PG_PASSWORD psql -h $$PG_HOST -U $$PG_USER -d $$PG_DB \
+          -c 'SELECT create_next_month_partition();'
+        sleep 86400
+      done"
+    restart: on-failure
+    networks:
+      - data
 
   spark-processor:
     build:
@@ -133,6 +159,9 @@ services:
     volumes:
       - spark_checkpoints:/opt/spark-checkpoints
     restart: on-failure
+    networks:
+      - backend
+      - data
     deploy:
       resources:
         limits:
@@ -160,9 +189,12 @@ services:
       PG_PASSWORD: ${PG_PASSWORD}
       SCAN_INTERVAL: ${SCAN_INTERVAL}
       METRICS_PORT: "9091"
-    ports:
-      - "9091:9091"
+    # ports:
+    #   - "9091:9091"
     restart: on-failure
+    networks:
+      - backend
+      - data
     deploy:
       resources:
         limits:
@@ -185,6 +217,8 @@ services:
       timeout: 10s
       retries: 10
       start_period: 120s
+    networks:
+      - backend
     deploy:
       resources:
         limits:
@@ -205,6 +239,8 @@ services:
       - ../.env
     environment:
       OLLAMA_HOST: http://ollama:11434
+    networks:
+      - backend
 
   ai-copilot:
     build:
@@ -228,9 +264,12 @@ services:
       PG_PASSWORD: ${PG_PASSWORD}
       COPILOT_INTERVAL: ${COPILOT_INTERVAL}
       METRICS_PORT: "9093"
-    ports:
-      - "9093:9093"
+    # ports:
+    #   - "9093:9093"
     restart: on-failure
+    networks:
+      - backend
+      - data
     deploy:
       resources:
         limits:
@@ -260,6 +299,9 @@ services:
       PG_PASSWORD: ${PG_PASSWORD}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
     restart: on-failure
+    networks:
+      - frontend
+      - data
 
   api-service:
     build:
@@ -279,9 +321,65 @@ services:
       PG_DB: ${PG_DB}
       PG_USER: ${PG_USER}
       PG_PASSWORD: ${PG_PASSWORD}
+      CORS_ORIGINS: http://localhost:8501
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: on-failure
+    networks:
+      - frontend
+      - data
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
+  # ── Prometheus ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: nexus-prometheus
+    ports:
+      - "9099:9090"
+    volumes:
+      - ../infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    restart: on-failure
+    networks: [backend, data, frontend]
+
+  # ── Grafana ─────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: nexus-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-change_this_in_production}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../infrastructure/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../infrastructure/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on: [prometheus]
+    restart: on-failure
+    networks: [frontend]
+
+networks:
+  frontend:
+  backend:
+  data:
 
 volumes:
   postgres_data:
   ollama_data:
   spark_checkpoints:
+  prometheus_data:
+  grafana_data:

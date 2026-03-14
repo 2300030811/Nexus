@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir \
 
 # Copy common module and API code
 COPY common/ /app/common/
+COPY scripts/ /app/scripts/
 COPY api_service/main.py /app/main.py
+
+RUN python /app/scripts/validate_secrets.py || exit 1
 
 EXPOSE 8000
 

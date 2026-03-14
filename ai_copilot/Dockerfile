@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY common/ /app/common/
 COPY ai_copilot/tools.py .
 COPY ai_copilot/copilot.py .
+COPY scripts/ /app/scripts/
+
+RUN python /app/scripts/validate_secrets.py || exit 1
 
 # Create non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app

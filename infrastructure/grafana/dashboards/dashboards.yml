@@ -1,0 +1,8 @@
+# infrastructure/grafana/dashboards/dashboards.yml
+apiVersion: 1
+providers:
+  - name: Nexus
+    folder: Nexus
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

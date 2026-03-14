@@ -23,6 +23,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, precision_recall_fscore_support
 
 from common.constants import CATEGORY_MAP, REGION_MAP, FEATURE_COLUMNS
+from common.model_utils import save_versioned_model
 
 from common.logging_utils import get_logger
 
@@ -59,7 +60,6 @@ def train(X: pd.DataFrame, y: pd.Series) -> tuple[xgb.XGBClassifier, dict]:
         scale_pos_weight=scale_pos_weight,
         eval_metric="aucpr",
         random_state=42,
-        use_label_encoder=False,
     )
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -91,67 +91,25 @@ def train(X: pd.DataFrame, y: pd.Series) -> tuple[xgb.XGBClassifier, dict]:
     return model, {"precision": precision, "recall": recall, "f1": f1, "importances": importances}
 
 
-def save_model(model: xgb.XGBClassifier, metrics: dict, training_data_path: str = DATA_PATH) -> None:
-    """Persist model and metadata to disk with versioning support.
-    
-    Args:
-        model: Trained XGBoost classifier
-        metrics: Training metrics (precision, recall, f1, etc.)
-        training_data_path: Path to training data CSV (for data hash)
-    """
-    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    
-    # Compute data hash for rollback purposes
-    data_hash = "unknown"
-    if os.path.exists(training_data_path):
-        with open(training_data_path, "rb") as f:
-            data_hash = hashlib.sha256(f.read()).hexdigest()[:8]
-    
-    # Create versioned model path
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    versioned_model_path = MODEL_PATH.replace(".json", f"_v{timestamp}.json")
-    
-    # Save model to both current and versioned paths
-    model.save_model(MODEL_PATH)
-    model.save_model(versioned_model_path)
-    logger.info("Model saved to %s", MODEL_PATH)
-    logger.info("Versioned backup: %s", versioned_model_path)
-
-    metadata = {
-        "model_type": "XGBClassifier",
-        "training_timestamp": timestamp,
-        "data_hash": data_hash,
-        "features": FEATURE_COLUMNS,
-        "category_map": CATEGORY_MAP,
-        "region_map": REGION_MAP,
-        "metrics": {k: float(v) if isinstance(v, (np.floating, float)) else v
-                    for k, v in metrics.items()},
-    }
-
-    # Convert numpy floats in importances
-    if "importances" in metadata["metrics"]:
-        metadata["metrics"]["importances"] = {
-            k: float(v) for k, v in metadata["metrics"]["importances"].items()
-        }
-
-    with open(METADATA_PATH, "w") as f:
-        json.dump(metadata, f, indent=2)
-    logger.info("Metadata saved to %s", METADATA_PATH)
-    
-    # Also save versioned metadata
-    versioned_metadata_path = METADATA_PATH.replace(".json", f"_v{timestamp}.json")
-    with open(versioned_metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-    logger.info("Versioned metadata: %s", versioned_metadata_path)
+# Removed save_model local implementation as it is now handled by common.model_utils
 
 
-def main() -> None:
-    logger.info("Reading training data from %s", DATA_PATH)
+def main():
     X, y = load_and_prepare(DATA_PATH)
-    logger.info("%d samples, %d anomalies (%.1f%%)", len(X), y.sum(), y.mean() * 100)
-
     model, metrics = train(X, y)
-    save_model(model, metrics)
+
+    from common.constants import CATEGORY_MAP, REGION_MAP, FEATURE_COLUMNS
+    save_versioned_model(
+        model,
+        model_dir=Path(MODEL_PATH).parent,
+        metadata={
+            "model_type": "XGBClassifier",
+            "features":   FEATURE_COLUMNS,
+            "category_map": CATEGORY_MAP,
+            "region_map":   REGION_MAP,
+            "metrics":      metrics,
+        },
+    )
     logger.info("Training complete")
 
 

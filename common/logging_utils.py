@@ -10,15 +10,24 @@ import sys
 from datetime import datetime, timezone
 
 
+import re
+
+# Regex to find potential secrets in log strings
+SECRETS_REGEX = re.compile(r"(password|secret|key|token|auth)['\"]?\s*[:=]\s*['\"]?([^'\"\s,]+)['\"]?", re.IGNORECASE)
+
 class JSONFormatter(logging.Formatter):
-    """Format log records as JSON for structured logging."""
+    """Format log records as JSON with automated secret masking."""
 
     def format(self, record: logging.LogRecord) -> str:
+        msg = record.getMessage()
+        # Mask common secret patterns
+        masked_msg = SECRETS_REGEX.sub(r"\1: [REDACTED]", msg)
+
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "service": record.name,
-            "message": record.getMessage(),
+            "message": masked_msg,
         }
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)

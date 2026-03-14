@@ -41,3 +41,29 @@ class TestProducerSimMode:
         # Should catch exception and default to False
         sim_mode = check_simulation_mode()
         assert sim_mode is False
+
+def test_on_error_logs_correct_event():
+    """Verifies that on_error captures the right event, not a later one."""
+    import json
+    import os
+    from kafka_producer.producer import make_error_handler
+    
+    dlq_file = "dlq_events.jsonl"
+    if os.path.exists(dlq_file):
+        os.remove(dlq_file)
+        
+    try:
+        events = [{"event_id": "A"}, {"event_id": "B"}]
+        # Create handlers for both, but only fire 'A'
+        handler_a = make_error_handler(events[0])
+        handler_b = make_error_handler(events[1]) # b is 'current' in a loop elsewhere
+        
+        handler_a(Exception("send failed"))
+        
+        with open(dlq_file, "r") as f:
+            saved = json.loads(f.readline())
+            
+        assert saved["event_id"] == "A"
+    finally:
+        if os.path.exists(dlq_file):
+            os.remove(dlq_file)

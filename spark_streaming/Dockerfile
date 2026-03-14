@@ -6,7 +6,10 @@ USER root
 RUN pip install --no-cache-dir pyspark==3.5.0 psycopg2-binary==2.9.9
 
 COPY common/ /app/common/
+COPY scripts/ /app/scripts/
 COPY spark_streaming/stream_processor.py /app/stream_processor.py
+
+RUN python /app/scripts/validate_secrets.py || exit 1
 
 WORKDIR /app
 

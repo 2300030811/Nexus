@@ -80,6 +80,7 @@ addopts = [
     "--cov=.",
     "--cov-report=term-missing",
     "--cov-report=html",
+    "--cov-fail-under=70",
 ]
 
 [tool.coverage.run]
@@ -105,3 +106,32 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
+[tool.hypothesis]
+max_examples = 100
+deriving_strategies_from = true
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+no_implicit_optional = true
+strict_optional = true
+
+# Ignore missing stubs for libraries that don't ship them
+[[tool.mypy.overrides]]
+module = [
+    "xgboost.*",
+    "kafka.*",
+    "pyspark.*",
+    "psycopg2.*",
+    "streamlit.*",
+    "streamlit_autorefresh.*",
+    "plotly.*",
+    "langchain.*",
+    "langchain_ollama.*",
+    "langchain_core.*",
+    "langgraph.*",
+    "prometheus_client.*",
+]
+ignore_missing_imports = true

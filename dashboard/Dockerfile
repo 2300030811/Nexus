@@ -7,6 +7,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common/ /app/common/
 COPY dashboard/app.py .
+COPY scripts/ /app/scripts/
+
+RUN python /app/scripts/validate_secrets.py || exit 1
 
 # Create non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app

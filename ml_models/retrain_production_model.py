@@ -29,6 +29,7 @@ from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
     get_hour_factor, get_dow_factor, FEATURE_COLUMNS
 )
+from common.model_utils import save_versioned_model
 
 from common.logging_utils import get_logger
 
@@ -188,38 +189,20 @@ def train_model(df: pd.DataFrame, test_size: float = 0.2) -> xgb.XGBClassifier:
     return model
 
 
-def save_model_with_metadata(model: xgb.XGBClassifier, df: pd.DataFrame) -> None:
-    """
-    Save model and metadata for versioning and rollback.
-    """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Save current model
-    model.save_model(str(MODEL_PATH))
-    logger.info("Model saved to %s", MODEL_PATH)
-    
-    # Save versioned copy
-    versioned_path = MODEL_DIR / f"model_v{timestamp}.json"
-    model.save_model(str(versioned_path))
-    logger.info("Versioned copy saved to %s", versioned_path)
-    
-    # Save metadata
-    data_hash = hashlib.sha256(str(df.values.tobytes()).encode()).hexdigest()[:16]
-    metadata = {
-        "training_timestamp": timestamp,
-        "data_hash": data_hash,
-        "num_samples": len(df),
-        "num_anomalies": int(df["is_anomaly"].sum()),
-        "anomaly_rate": float(df["is_anomaly"].mean()),
-        "features": FEATURE_COLUMNS,
-        "category_map": CATEGORY_MAP,
-        "region_map": REGION_MAP,
-    }
-    
-    metadata_path = MODEL_DIR / "metadata.json"
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
-    logger.info("Metadata saved to %s", metadata_path)
+def save_model_with_metadata(model, df):
+    save_versioned_model(
+        model,
+        model_dir=MODEL_DIR,
+        metadata={
+            "num_samples":   len(df),
+            "num_anomalies": int(df["is_anomaly"].sum()),
+            "anomaly_rate":  float(df["is_anomaly"].mean()),
+            "features":      FEATURE_COLUMNS,
+            "category_map":  CATEGORY_MAP,
+            "region_map":    REGION_MAP,
+        },
+        source_df=df,
+    )
 
 
 def main():

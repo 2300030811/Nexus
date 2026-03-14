@@ -1,0 +1,69 @@
+{
+  "title": "Nexus Platform Overview",
+  "uid": "nexus-overview",
+  "panels": [
+    {
+      "title": "Events per minute",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "rate(nexus_events_produced_total[1m]) * 60",
+        "legendFormat": "EPM"
+      }]
+    },
+    {
+      "title": "Anomalies detected (by severity)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "increase(nexus_anomalies_detected_total{severity='critical'}[5m])", "legendFormat": "Critical" },
+        { "expr": "increase(nexus_anomalies_detected_total{severity='high'}[5m])",     "legendFormat": "High" },
+        { "expr": "increase(nexus_anomalies_detected_total{severity='medium'}[5m])",   "legendFormat": "Medium" }
+      ]
+    },
+    {
+      "title": "LLM response time (p95)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, rate(nexus_llm_response_seconds_bucket[5m]))",
+        "legendFormat": "p95 latency"
+      }]
+    },
+    {
+      "title": "DB reconnects",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(nexus_db_reconnects_total)" }]
+    },
+    {
+      "title": "Investigation errors",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 4 },
+      "targets": [{ "expr": "nexus_investigation_errors_total" }]
+    },
+    {
+      "title": "Scoring latency (p99)",
+      "type": "gauge",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green",  "value": 0    },
+              { "color": "yellow", "value": 0.5  },
+              { "color": "red",    "value": 1.0  }
+            ]
+          },
+          "unit": "s"
+        }
+      },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, rate(nexus_scoring_latency_seconds_bucket[5m]))"
+      }]
+    }
+  ],
+  "time":     { "from": "now-1h", "to": "now" },
+  "refresh":  "30s",
+  "schemaVersion": 39
+}

@@ -78,19 +78,21 @@ def run_update(query: str, params: tuple = ()):
 # ---------------------------------------------------------------------------
 # Data functions
 # ---------------------------------------------------------------------------
+@st.cache_data(ttl=5)
 def load_kpis(minutes: int) -> dict:
-    """Load KPIs with safe handling of empty resultsets."""
+    """Load KPIs using pre-aggregated metrics for performance."""
     try:
+        # OPTIMIZATION: Use revenue_metrics instead of scanning order_events
         row = run_query("""
-            SELECT COUNT(*) as total_orders, COALESCE(SUM(total_amount), 0) as total_revenue
-            FROM order_events WHERE event_timestamp >= NOW() - INTERVAL '%s minutes'
+            SELECT SUM(order_count) as total_orders, SUM(total_revenue) as total_revenue
+            FROM revenue_metrics WHERE window_end >= NOW() - INTERVAL '%s minutes'
         """, (minutes,))
         
         anom = run_query("SELECT COUNT(*) as count FROM anomalies WHERE status = 'open'")
         reports = run_query("SELECT COUNT(*) as count FROM copilot_reports")
         
-        orders = int(row["total_orders"].iloc[0]) if not row.empty else 0
-        revenue = float(row["total_revenue"].iloc[0]) if not row.empty else 0.0
+        orders = int(row["total_orders"].iloc[0]) if not row.empty and not pd.isna(row["total_orders"].iloc[0]) else 0
+        revenue = float(row["total_revenue"].iloc[0]) if not row.empty and not pd.isna(row["total_revenue"].iloc[0]) else 0.0
         open_anom = int(anom["count"].iloc[0]) if not anom.empty else 0
         total_reps = int(reports["count"].iloc[0]) if not reports.empty else 0
         
@@ -104,25 +106,29 @@ def load_kpis(minutes: int) -> dict:
         st.warning(f"KPI load error: {str(e)}")
         return {"orders": 0, "revenue": 0.0, "open_anomalies": 0, "total_reports": 0}
 
+@st.cache_data(ttl=10)
 def load_system_health() -> dict:
-    """Load system health metrics with safe handling of empty resultsets."""
+    """Load system health metrics with performance optimizations."""
     try:
-        # Estimate throughput (5-minute rolling average for stability)
-        epm_df = run_query("SELECT COUNT(*) as count FROM order_events WHERE ingested_at >= NOW() - INTERVAL '5 minutes'")
-        event_count = int(epm_df["count"].iloc[0]) if not epm_df.empty else 0
-        epm = round(event_count / 5.0, 1)  # Average per minute over 5 minutes
+        # Estimate throughput (5-minute rolling average)
+        # We can't use revenue_metrics for near-instant ingestion status, 
+        # so we scan a small window of order_events. 
+        # But we limit it to just the count.
+        epm_check = run_query("SELECT COUNT(*) as count FROM order_events WHERE ingested_at >= NOW() - INTERVAL '5 minutes'")
+        event_count = int(epm_check["count"].iloc[0]) if not epm_check.empty else 0
+        epm = round(event_count / 5.0, 1)
         
-        # Estimate latency (avg diff between ingested_at and event_timestamp)
-        latency_df = run_query("SELECT AVG(EXTRACT(EPOCH FROM (ingested_at - event_timestamp))) as lat FROM order_events WHERE event_timestamp >= NOW() - INTERVAL '5 minutes'")
-        latency = round(float(latency_df["lat"].iloc[0]) if latency_df["lat"].iloc[0] else 0.0, 2) if not latency_df.empty else 0.0
+        # Estimate latency using a small sample
+        latency_df = run_query("""
+            SELECT AVG(EXTRACT(EPOCH FROM (ingested_at - event_timestamp))) as lat 
+            FROM (SELECT ingested_at, event_timestamp FROM order_events ORDER BY ingested_at DESC LIMIT 100) s
+        """)
+        latency = round(float(latency_df["lat"].iloc[0]) if not latency_df.empty and latency_df["lat"].iloc[0] else 0.0, 2)
         
-        # Last model prediction
         last_pred_df = run_query("SELECT MAX(detected_at) as last FROM anomalies")
         last_pred = last_pred_df["last"].iloc[0] if not last_pred_df.empty and last_pred_df["last"].iloc[0] else None
         
-        # Check Kafka connectivity (simple heuristic: events in last 2 minutes)
-        kafka_check = run_query("SELECT COUNT(*) as count FROM order_events WHERE ingested_at >= NOW() - INTERVAL '2 minutes'")
-        kafka_connected = int(kafka_check["count"].iloc[0]) > 0 if not kafka_check.empty else False
+        kafka_connected = event_count > 0 # Based on 5m window
         
         return {
             "epm": epm,
@@ -141,12 +147,63 @@ def get_simulation_mode() -> bool:
 def toggle_simulation(target: bool):
     run_update("UPDATE app_config SET value = %s WHERE key = 'simulate_stockout'", (str(target).lower(),))
 
+
+def load_model_health() -> dict:
+    """Load latest drift metrics."""
+    try:
+        df = run_query("""
+            SELECT measured_at, anomaly_rate, avg_score, score_std,
+                   psi_revenue, drift_flag, notes
+            FROM model_drift_log
+            ORDER BY measured_at DESC
+            LIMIT 1
+        """)
+        if df.empty:
+            return {"available": False}
+        row = df.iloc[0]
+        return {
+            "available":    True,
+            "measured_at":  row["measured_at"],
+            "anomaly_rate": float(row["anomaly_rate"]),
+            "avg_score":    float(row["avg_score"]),
+            "psi_revenue":  float(row["psi_revenue"]) if row["psi_revenue"] else None,
+            "drift_flag":   bool(row["drift_flag"]),
+            "notes":        row["notes"],
+        }
+    except Exception:
+        return {"available": False}
+
+
+def load_dlq_stats() -> dict:
+    """Load dead letter queue depth."""
+    try:
+        df = run_query("""
+            SELECT
+                COUNT(*)                                          AS total,
+                COUNT(*) FILTER (WHERE resolved = FALSE)         AS pending,
+                COUNT(*) FILTER (WHERE retry_count >= 5
+                                   AND resolved = FALSE)         AS exhausted,
+                MAX(first_failed)                                AS oldest
+            FROM dlq_events
+        """)
+        if df.empty:
+            return {"pending": 0, "exhausted": 0}
+        row = df.iloc[0]
+        return {
+            "total":     int(row["total"]),
+            "pending":   int(row["pending"]),
+            "exhausted": int(row["exhausted"]),
+            "oldest":    row["oldest"],
+        }
+    except Exception:
+        return {"pending": 0, "exhausted": 0}
+
 # ---------------------------------------------------------------------------
 # UI Components
 # ---------------------------------------------------------------------------
 # Check authentication first
-# if not check_password():
-#     st.stop()
+if not check_password():
+    st.stop()
 
 
 
@@ -194,6 +251,33 @@ else:
 # Kafka Status with actual health check
 kafka_status = "🟢 Connected" if health['kafka_connected'] else "🔴 Disconnected"
 h4.metric("Kafka Status", kafka_status)
+
+st.header("ML Model Health")
+model_health = load_model_health()
+dlq          = load_dlq_stats()
+
+mh1, mh2, mh3, mh4 = st.columns(4)
+
+if model_health["available"]:
+    drift_delta = "DRIFT DETECTED" if model_health["drift_flag"] else "Normal"
+    mh1.metric("Anomaly Rate", f"{model_health['anomaly_rate']:.1%}", delta=drift_delta)
+    mh2.metric("Avg Score",    f"{model_health['avg_score']:.3f}")
+    psi = model_health["psi_revenue"]
+    psi_label = f"{psi:.3f}" if psi is not None else "n/a"
+    psi_delta = "High drift" if psi and psi > 0.2 else ("Monitor" if psi and psi > 0.1 else None)
+    mh3.metric("Revenue PSI", psi_label, delta=psi_delta)
+    if model_health["drift_flag"] and model_health["notes"]:
+        st.warning(f"Model drift alert: {model_health['notes']}")
+else:
+    mh1.metric("Model Health", "No data yet")
+
+mh4.metric("DLQ Depth", dlq["pending"],
+           delta=f"{dlq['exhausted']} exhausted" if dlq["exhausted"] > 0 else None)
+if dlq.get("exhausted", 0) > 0:
+    st.error(
+        f"{dlq['exhausted']} events in the dead letter queue have exceeded "
+        f"max retries and will not be retried automatically."
+    )
 
 st.header("Business Performance")
 b1, b2, b3, b4 = st.columns(4)
@@ -263,10 +347,14 @@ if not anoms.empty:
         drop_pct = ((expected - actual) / expected) * 100 if expected > 0 else 0
         drop_text = f"<span style='color:{color}; font-weight:bold;'>▼ {drop_pct:.1f}% DROP</span>" if actual < expected else f"<span style='color:#00FF00; font-weight:bold;'>▲ {abs(drop_pct):.1f}% SPIKE</span>"
 
+        cat = escape(str(row['category']))
+        reg = escape(str(row['region']))
+        sev = escape(str(row['severity'])).upper()
+        
         st.markdown(f"""
             <div style="border-left: 5px solid {color}; padding: 15px; background: rgba(30, 30, 30, 0.6); margin-bottom: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
-                    <div style="font-size: 1.1em;">{icon} <b style="color:{color}">{row['severity'].upper()}</b> Anomaly detected in <b>{row['category']}</b> (Region: {row['region']})</div>
+                    <div style="font-size: 1.1em;">{icon} <b style="color:{color}">{sev}</b> Anomaly detected in <b>{cat}</b> (Region: {reg})</div>
                     <div style="color: #888; font-size: 0.9em;">{row['detected_at'].strftime("%H:%M:%S")}</div>
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center;">

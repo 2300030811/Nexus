@@ -66,13 +66,11 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 # ---------------------------------------------------------------------------
 
 
+from common.db_utils import get_single_connection, close_connection
+
 def get_connection():
-    """Create a new PostgreSQL connection with timeout."""
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASSWORD,
-        connect_timeout=5,  # Connection timeout
-    )
+    """Create a new PostgreSQL connection with timeout (using shared util)."""
+    return get_single_connection()
 
 
 # Removed ensure_anomalies_table - handled by init.sql

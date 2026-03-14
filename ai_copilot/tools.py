@@ -15,6 +15,7 @@ from langchain_core.tools import tool
 
 from common.logging_utils import get_logger
 from common.db_utils import get_db_config
+from common.cache import _cache
 
 logger = get_logger("nexus.copilot.tools")
 
@@ -264,20 +265,30 @@ ALL_TOOLS = [
 # These call the same SQL but return the formatted strings directly.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Direct query helpers (Optimized with LRU-TTL Cache decorator)
+# ---------------------------------------------------------------------------
+
+@_cache.cached(key_fn=lambda category: f"rev_cat:{category}")
 def query_revenue_by_category(category: str) -> str:
     return get_revenue_by_category.invoke(category)
 
+@_cache.cached(key_fn=lambda region: f"rev_reg:{region}")
 def query_revenue_by_region(region: str) -> str:
     return get_revenue_by_region.invoke(region)
 
+@_cache.cached(key_fn=lambda category: f"prod_vol:{category}")
 def query_product_order_volume(category: str) -> str:
     return get_product_order_volume.invoke(category)
 
+@_cache.cached(key_fn=lambda category, region: f"feat:{category}:{region}")
 def query_feature_snapshot(category: str, region: str) -> str:
     return get_feature_snapshot.invoke({"category": category, "region": region})
 
+@_cache.cached(key_fn=lambda minutes=15: f"trend:{minutes}")
 def query_recent_order_trend(minutes: int = 15) -> str:
     return get_recent_order_trend.invoke(minutes)
 
+@_cache.cached(key_fn=lambda: "pay_breakdown")
 def query_payment_method_breakdown() -> str:
-    return get_payment_method_breakdown.invoke("")
+    return get_payment_method_breakdown.invoke({})

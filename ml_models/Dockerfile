@@ -11,6 +11,9 @@ COPY ml_models/train_model.py .
 COPY ml_models/detect_anomalies.py .
 COPY ml_models/retrain_production_model.py .
 COPY ml_models/entrypoint.sh .
+COPY scripts/ /app/scripts/
+
+RUN python /app/scripts/validate_secrets.py || exit 1
 RUN chmod +x entrypoint.sh
 
 # Directories for data and model artifacts

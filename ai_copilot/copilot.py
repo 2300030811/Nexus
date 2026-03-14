@@ -15,11 +15,13 @@ import sys
 import time
 import json
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from langchain_ollama import ChatOllama
+from circuit_breaker import CircuitBreaker
 
 from tools import (
     query_revenue_by_category, query_revenue_by_region,
@@ -245,45 +247,37 @@ def create_llm():
 
 
 def gather_investigation_data(anomaly: dict) -> str:
-    """Phase 1: Gather all relevant data from the database directly."""
+    """Phase 1: Gather all relevant data from the database in parallel."""
     category = anomaly["category"]
     region = anomaly["region"]
+    
+    # Define investigation tasks
+    tasks = [
+        ("Revenue by Category",  lambda: query_revenue_by_category(category)),
+        ("Revenue by Region",    lambda: query_revenue_by_region(region)),
+        ("Product Order Volume", lambda: query_product_order_volume(category)),
+        ("Feature Snapshot",     lambda: query_feature_snapshot(category, region)),
+        ("Recent Order Trend",   lambda: query_recent_order_trend(15)),
+        ("Payment Breakdown",    lambda: query_payment_method_breakdown()),
+    ]
+
     sections = []
-
-    try:
-        sections.append(query_revenue_by_category(category))
-    except Exception as e:
-        sections.append(f"Category revenue data unavailable: {e}")
-
-    try:
-        sections.append(query_revenue_by_region(region))
-    except Exception as e:
-        sections.append(f"Region revenue data unavailable: {e}")
-
-    try:
-        sections.append(query_product_order_volume(category))
-    except Exception as e:
-        sections.append(f"Product volume data unavailable: {e}")
-
-    try:
-        sections.append(query_feature_snapshot(category, region))
-    except Exception as e:
-        sections.append(f"Feature snapshot unavailable: {e}")
-
-    try:
-        sections.append(query_recent_order_trend(15))
-    except Exception as e:
-        sections.append(f"Order trend data unavailable: {e}")
-
-    try:
-        sections.append(query_payment_method_breakdown())
-    except Exception as e:
-        sections.append(f"Payment breakdown unavailable: {e}")
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        future_to_name = {executor.submit(func): name for name, func in tasks}
+        # results are returned as they complete
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                result = future.result()
+                sections.append(f"### {name}\n{result}")
+            except Exception as e:
+                logger.error("Investigation task '%s' failed: %s", name, e)
+                sections.append(f"### {name}\nData unavailable: {e}")
 
     return "\n\n".join(sections)
 
 
-def investigate_anomaly(llm, anomaly: dict) -> str:
+def investigate_anomaly(llm, breaker, anomaly: dict) -> str:
     """Two-phase investigation: gather data, then ask LLM to analyze."""
     actual = float(anomaly['actual_revenue'])
     expected = float(anomaly['expected_revenue'])
@@ -314,10 +308,14 @@ def investigate_anomaly(llm, anomaly: dict) -> str:
         f"Now write the report. Remember: Estimated Loss and Confidence must be plain numbers."
     )
 
-    response = llm.invoke([
-        ("system", SYSTEM_PROMPT),
-        ("human", user_msg),
-    ])
+    try:
+        response = breaker.call(llm.invoke, [
+            ("system", SYSTEM_PROMPT),
+            ("human", user_msg),
+        ])
+    except RuntimeError as breaker_open:
+        logger.error("LLM unavailable: %s", breaker_open)
+        return ""  # Skip this anomaly, retry next scan
 
     content = response.content if hasattr(response, "content") else str(response)
     if isinstance(content, list):
@@ -351,7 +349,7 @@ def main() -> None:
     logger.info("AI Copilot starting")
 
     # Start Prometheus metrics endpoint
-    metrics_port = int(os.getenv("METRICS_PORT", "9092"))
+    metrics_port = int(os.getenv("METRICS_PORT", "9093"))
     start_metrics_server(metrics_port)
     logger.info("Prometheus metrics available on port %d", metrics_port)
 
@@ -360,6 +358,7 @@ def main() -> None:
     conn = get_connection()
 
     llm = create_llm()
+    llm_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=300, name="ollama")
     logger.info("Copilot scanning for anomalies every %ds", SCAN_INTERVAL)
 
     scan_count = 0
@@ -378,15 +377,13 @@ def main() -> None:
             else:
                 logger.info("Scan #%d: Found %d anomalies to investigate", scan_count, len(anomalies))
 
-                for anomaly in anomalies:
-                    logger.info("Investigating anomaly #%d – %s %s/%s",
-                               anomaly['id'], anomaly['severity'],
-                               anomaly['category'], anomaly['region'])
-
+                def process_anomaly(anomaly):
                     try:
                         INVESTIGATIONS_TOTAL.inc()
                         with LLM_RESPONSE_TIME.time():
-                            report = investigate_anomaly(llm, anomaly)
+                            report = investigate_anomaly(llm, llm_breaker, anomaly)
+                        if not report:
+                            return
                         parsed = parse_report(report, anomaly)
 
                         save_report(conn, anomaly, report, parsed)
@@ -394,11 +391,17 @@ def main() -> None:
                         logger.info("Anomaly #%d – report saved | cause: %s | confidence: %.2f | loss: ₹%.2f",
                                    anomaly['id'], parsed['root_cause'][:120],
                                    parsed['confidence'], parsed['estimated_loss'])
-
                     except Exception as e:
                         INVESTIGATION_ERRORS.inc()
                         logger.error("Failed to investigate anomaly #%d: %s", anomaly['id'], e)
-                        # Continue to next anomaly instead of crashing
+
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = [executor.submit(process_anomaly, anomaly) for anomaly in anomalies]
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error("Parallel investigation worker failed: %s", e)
 
         except psycopg2.OperationalError as db_err:
             DB_RECONNECTS.labels(service="ai-copilot").inc()

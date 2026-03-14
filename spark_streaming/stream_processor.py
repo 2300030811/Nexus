@@ -10,6 +10,7 @@ from pyspark.sql.types import (
 )
 
 from common.logging_utils import get_logger
+from batch_health import BatchHealth
 
 # ---------------------------------------------------------------------------
 # Structured logging (via shared utility)
@@ -62,11 +63,17 @@ def create_spark_session() -> SparkSession:
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
                 "org.postgresql:postgresql:42.7.1")
         .config("spark.sql.streaming.schemaInference", "false")
-        .config("spark.sql.shuffle.partitions", "8")  # Increased from 4 for better parallelism
-        .config("spark.sql.streaming.minBatchesToRetain", "100")
+        # --- AQE & Performance ---
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.skewJoin.enabled", "true")
+        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+        .config("spark.default.parallelism", "16")
+        .config("spark.sql.shuffle.partitions", "16")
+        # --- Streaming Robustness ---
+        .config("spark.sql.streaming.maxOffsetsPerTrigger", "10000")
+        .config("spark.sql.streaming.minBatchesToRetain", "50")
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
-        .config("spark.default.parallelism", "8")
-        .config("spark.streaming.kafka.maxRatePerPartition", "1000")  # Rate limiting
         .getOrCreate()
     )
 
@@ -82,9 +89,9 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
     )
 
     parsed = (
-        raw.selectExpr("CAST(value AS STRING) as json_str", "timestamp as kafka_time")
-        .select(F.from_json(F.col("json_str"), ORDER_SCHEMA).alias("data"), "kafka_time")
-        .select("data.*", "kafka_time")
+        raw.selectExpr("CAST(value AS STRING) as json_str")  # Dropped unused Kafka metadata (key, partition, etc) early
+        .select(F.from_json(F.col("json_str"), ORDER_SCHEMA).alias("data"))
+        .select("data.*")
         .withColumn("event_timestamp", F.to_timestamp("timestamp"))
         .drop("timestamp")
     )
@@ -93,72 +100,93 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
 # ---------------------------------------------------------------------------
 # Shared JDBC Upsert Helper
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Shared JDBC Upsert Helper (Optimized for scale)
+# ---------------------------------------------------------------------------
 def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, update_cols: list):
-    """Collect batch to driver and execute a native PostgreSQL upsert via psycopg2."""
+    """
+    Execute a native PostgreSQL upsert via psycopg2.
+    Optimized: Runs in parallel across Spark executors instead of collecting to driver.
+    """
     import psycopg2
     from psycopg2.extras import execute_values
 
-    rows = batch_df.collect()
-    if not rows:
-        return
+    def upsert_partition(rows):
+        # Create a connection per partition on the executor
+        conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
+        try:
+            columns = batch_df.columns
+            col_list = ", ".join(columns)
+            constraint_str = ", ".join(constraint_cols)
+            update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
 
-    columns = batch_df.columns
-    col_list = ", ".join(columns)
-    constraint_str = ", ".join(constraint_cols)
-    update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+            upsert_sql = (
+                f"INSERT INTO {table_name} ({col_list}) VALUES %s "
+                f"ON CONFLICT ({constraint_str}) DO UPDATE SET {update_str}"
+            )
+            
+            # Batch values into groups of 1000 for efficiency
+            partition_data = [tuple(row) for row in rows]
+            if not partition_data:
+                return
 
-    upsert_sql = (
-        f"INSERT INTO {table_name} ({col_list}) VALUES %s "
-        f"ON CONFLICT ({constraint_str}) DO UPDATE SET {update_str}"
-    )
+            with conn.cursor() as cur:
+                execute_values(cur, upsert_sql, partition_data, page_size=1000)
+            conn.commit()
+        finally:
+            conn.close()
+        yield True # Return a dummy value to satisfy mapPartitions
 
-    values = [tuple(row) for row in rows]
-
-    conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
-    try:
-        with conn.cursor() as cur:
-            execute_values(cur, upsert_sql, values)
-        conn.commit()
-    finally:
-        conn.close()
+    # Execute in parallel on Spark clusters
+    batch_df.foreachPartition(upsert_partition)
 
 # ---------------------------------------------------------------------------
-# Sinks
+# Sinks with Health Tracking
 # ---------------------------------------------------------------------------
+_metrics_health  = BatchHealth("revenue_metrics",  failure_threshold=5)
+_raw_health      = BatchHealth("raw_events",        failure_threshold=5)
+_features_health = BatchHealth("feature_store",     failure_threshold=5)
+
+
 def write_raw_events_batch(batch_df: DataFrame, batch_id: int) -> None:
-    """Write raw events with duplicate prevention."""
-    if batch_df.isEmpty(): return
+    if batch_df.isEmpty():
+        return
     try:
-        # Use upsert to handle potential duplicates if checkpoints are reset
         execute_upsert(
             batch_df.select(
                 "event_id", "event_type", "event_timestamp", "order_id",
                 "product_id", "product_name", "category", "quantity",
                 "unit_price", "total_amount", "region", "payment_method",
             ),
-            "order_events", ["event_id"], 
-            ["event_type", "event_timestamp", "order_id", "product_id", "product_name", 
-             "category", "quantity", "unit_price", "total_amount", "region", "payment_method"]
+            "order_events", ["event_id"],
+            ["event_type", "event_timestamp", "order_id", "product_id",
+             "product_name", "category", "quantity", "unit_price",
+             "total_amount", "region", "payment_method"],
         )
+        _raw_health.record_success()
     except Exception as e:
+        _raw_health.record_failure(e)
         logger.error("Failed to write raw events batch %d: %s", batch_id, e)
+        if not _raw_health.is_healthy:
+            raise
+
 
 def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
-    """Upsert revenue metrics with error handling."""
     if batch_df.isEmpty():
         return
-    
     try:
-        # Primary Key for revenue_metrics is (window_start, window_end, category, region)
         execute_upsert(
-            batch_df, "revenue_metrics", 
+            batch_df, "revenue_metrics",
             ["window_start", "window_end", "category", "region"],
-            ["order_count", "total_revenue", "avg_order_value"]
+            ["order_count", "total_revenue", "avg_order_value"],
         )
+        _metrics_health.record_success()
     except Exception as e:
+        _metrics_health.record_failure(e)
         logger.error("Failed to write metrics batch %d: %s", batch_id, e)
-        # Don't re-raise; let the streaming query continue
-        # Checkpoint will ensure we retry next time
+        # Re-raise so Spark marks the batch as failed and replays from checkpoint
+        if not _metrics_health.is_healthy:
+            raise
 
 def write_features_batch(batch_df: DataFrame, batch_id: int) -> None:
     """Compute and write feature store with error handling."""
@@ -250,10 +278,43 @@ def main() -> None:
         )
     )
 
+    # Feature Store Aggregation directamente off the streaming events
+    feature_agg = (
+        events.withWatermark("event_timestamp", "2 minutes")
+        .groupBy(
+            F.window("event_timestamp", "5 minutes"),
+            "category", "region"
+        )
+        .agg(
+            F.round(F.sum("total_amount"), 2).alias("revenue_last_5m"),
+            F.count("order_id").alias("orders_last_5m"),
+            F.round(F.avg("total_amount"), 2).alias("avg_order_value_last_5m"),
+        )
+        .withColumn("computed_at", F.current_timestamp())
+    )
+
+    def write_features_direct(batch_df: DataFrame, batch_id: int) -> None:
+        if batch_df.isEmpty(): return
+        try:
+            feats = batch_df.select(
+                "computed_at", "category", "region",
+                "revenue_last_5m", F.lit(0.0).alias("revenue_last_15m"), F.lit(0.0).alias("revenue_last_60m"),
+                "orders_last_5m", F.lit(0).alias("orders_last_15m"), F.lit(0).alias("orders_last_60m"),
+                F.col("avg_order_value_last_5m").alias("avg_order_value_last_15m"),
+                F.lit(0.0).alias("revenue_trend_pct")
+            )
+            feats.write.jdbc(url=PG_URL, table="feature_store", mode="append", properties=PG_PROPERTIES)
+            _features_health.record_success()
+        except Exception as e:
+            _features_health.record_failure(e)
+            logger.error("Failed to write features batch %d: %s", batch_id, e)
+            if not _features_health.is_healthy:
+                raise
+
     # Queries
     raw_query = events.writeStream.foreachBatch(write_raw_events_batch).option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_events").start()
     agg_query = agg_df.writeStream.foreachBatch(write_metrics_batch).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/revenue_metrics").start()
-    feature_query = events.writeStream.foreachBatch(write_features_batch).option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store").trigger(processingTime="60 seconds").start()
+    feature_query = feature_agg.writeStream.foreachBatch(write_features_direct).option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_direct").trigger(processingTime="60 seconds").start()
 
     logger.info("Spark streaming started")
     spark.streams.awaitAnyTermination()

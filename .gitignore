@@ -58,6 +58,9 @@ nosetests.xml
 coverage.xml
 test_output*.txt
 test_api_output*.txt
+test_out.txt
+results.xml
+*.xml
 
 # OS
 .DS_Store

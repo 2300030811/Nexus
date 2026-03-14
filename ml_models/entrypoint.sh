@@ -3,14 +3,17 @@ set -e
 
 echo "=== Nexus ML Pipeline ==="
 
-# Step 1: Generate synthetic training data
-echo "[1/3] Generating training data ..."
+echo "[1/4] Generating training data ..."
 python generate_training_data.py
 
-# Step 2: Train the XGBoost model
-echo "[2/3] Training anomaly detection model ..."
+echo "[2/4] Training anomaly detection model ..."
 python train_model.py
 
-# Step 3: Run the live anomaly detection loop
-echo "[3/3] Starting anomaly detection service ..."
+echo "[3/4] Starting anomaly detection service ..."
+# Run drift monitor hourly in background
+while true; do
+    python drift_monitor.py
+    sleep 3600
+done &
+
 python detect_anomalies.py

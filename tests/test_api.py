@@ -60,3 +60,9 @@ class TestNexusAPI:
         assert data["orders"] == 100
         assert data["revenue"] == 5000.0
         assert data["open_anomalies"] == 3
+
+    @patch("api_service.main._get_pool")
+    def test_health_check_db_failure_pool(self, mock_pool):
+        mock_pool.side_effect = Exception("pool exhausted")
+        response = client.get("/health")
+        assert response.status_code == 503

@@ -21,11 +21,12 @@ from kafka.errors import NoBrokersAvailable
 
 from common.logging_utils import get_logger
 from common.metrics import (
-    EVENTS_PRODUCED, PRODUCE_ERRORS, SIMULATION_MODE as SIMULATION_GAUGE,
+    EVENTS_PRODUCED, PRODUCE_ERRORS, SIMULATION_ACTIVE as SIMULATION_GAUGE,
     start_metrics_server,
 )
 from common.constants import PRODUCTS, REGIONS, PAYMENT_METHODS
 from common.db_utils import get_db_config
+from .dlq import DeadLetterQueue
 
 # ---------------------------------------------------------------------------
 # Structured logging (via shared utility)
@@ -69,10 +70,10 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
                 bootstrap_servers=broker,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 acks=1, # Wait for leader to acknowledge
-                retries=3,
-                batch_size=16384, # Standard batch
-                linger_ms=10, # Lower linger for faster debugging
-                compression_type=None, # Disable compression for compatibility check
+                retries=5,
+                batch_size=32768, # 32KB batches
+                linger_ms=20, # Higher linger for better batching efficiency
+                compression_type="lz4", # Efficient compression for JSON telemetry
             )
             logger.info("Connected to Kafka broker at %s", broker)
             return producer
@@ -82,24 +83,40 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
     raise RuntimeError(f"Could not connect to Kafka broker at {broker}")
 
 
+from common.db_utils import get_single_connection, close_connection
+
+_sim_conn: psycopg2.extensions.connection | None = None
+
+def _get_sim_conn():
+    """Return a persistent connection, reconnecting if necessary."""
+    global _sim_conn
+    if _sim_conn is None or _sim_conn.closed:
+        try:
+            _sim_conn = get_single_connection()
+        except Exception:
+            _sim_conn = None
+    return _sim_conn
+
+
 def check_simulation_mode() -> bool:
-    """Check if 'simulate_stockout' is enabled in the database."""
-    try:
-        conn = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-            user=PG_USER, password=PG_PASSWORD,
-            connect_timeout=5
-        )
-        with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_config WHERE key = 'simulate_stockout'")
-            res = cur.fetchone()
-            return res[0].lower() == 'true' if res else False
-    except Exception as e:
-        logger.warning("Could not check simulation mode: %s", e)
+    """Check simulate_stockout flag using a persistent connection."""
+    conn = _get_sim_conn()
+    if conn is None:
         return False
-    finally:
-        if 'conn' in locals():
-            conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_config WHERE key = 'simulate_stockout'"
+            )
+            res = cur.fetchone()
+            return res[0].lower() == "true" if res else False
+    except Exception as e:
+        logger.warning("Simulation mode check failed: %s", e)
+        # Force reconnect next call
+        close_connection(conn)
+        global _sim_conn
+        _sim_conn = None
+        return False
 
 
 def generate_order_event(simulate_stockout: bool = False) -> dict:
@@ -140,6 +157,15 @@ def generate_order_event(simulate_stockout: bool = False) -> dict:
     }
 
 
+def make_error_handler(captured_event, dlq):
+    """Factory to create an error handler that captures the current event."""
+    def on_error(excp):
+        logger.error("Kafka send failed: %s", excp)
+        PRODUCE_ERRORS.inc()
+        dlq.put(captured_event, str(excp))
+    return on_error
+
+
 def main() -> None:
     # Start Prometheus metrics endpoint
     metrics_port = int(os.getenv("METRICS_PORT", "9090"))
@@ -147,6 +173,9 @@ def main() -> None:
     logger.info("Prometheus metrics available on port %d", metrics_port)
 
     producer = create_producer(KAFKA_BROKER)
+
+    dlq = DeadLetterQueue(producer, KAFKA_TOPIC)
+
     logger.info("Producing events to '%s' at ~%.1f events/sec", KAFKA_TOPIC, EVENTS_PER_SECOND)
 
     event_count = 0
@@ -167,25 +196,17 @@ def main() -> None:
             def on_success(record_metadata):
                 pass # Already printing periodic updates
             
-            def on_error(excp):
-                logger.error("Kafka send failed: %s", excp)
-                PRODUCE_ERRORS.inc()
-                # Dead Letter Queue: preserve failed events
-                try:
-                    with open("dlq_events.jsonl", "a") as f:
-                        f.write(json.dumps(event) + "\n")
-                except Exception as e:
-                    logger.error("Could not write to DLQ: %s", e)
-
-            producer.send(KAFKA_TOPIC, key=event_key, value=event).add_callback(on_success).add_errback(on_error)
+            producer.send(KAFKA_TOPIC, key=event_key, value=event) \
+                .add_callback(on_success) \
+                .add_errback(make_error_handler(event, dlq))
             EVENTS_PRODUCED.labels(topic=KAFKA_TOPIC).inc()
             event_count += 1
 
-            if event_count % 10 == 0:
+            if event_count % 50 == 0:
                 logger.info("%d events sent | latest: %s – %s x%d = ₹%.2f",
                             event_count, event['order_id'], event['product_name'],
                             event['quantity'], event['total_amount'])
-                producer.flush() # Force flush to catch errors faster during debugging
+                producer.flush() # Periodic flush to catch send errors
 
             time.sleep(1 / EVENTS_PER_SECOND)
     except KeyboardInterrupt:
