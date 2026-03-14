@@ -3,6 +3,7 @@
 
 import threading
 import time
+from typing import Optional
 from dataclasses import dataclass, field
 from common.logging_utils import get_logger
 
@@ -16,7 +17,7 @@ class BatchHealth:
     _consecutive_failures: int = field(default=0, init=False, repr=False)
     _total_failures: int = field(default=0, init=False, repr=False)
     _total_batches: int = field(default=0, init=False, repr=False)
-    _last_failure: float | None = field(default=None, init=False, repr=False)
+    _last_failure: Optional[float] = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )

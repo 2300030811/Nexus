@@ -10,6 +10,7 @@ from pyspark.sql.types import (
 )
 
 from common.logging_utils import get_logger
+from common.metrics import start_metrics_server
 from batch_health import BatchHealth
 
 # ---------------------------------------------------------------------------
@@ -23,11 +24,14 @@ logger = get_logger("nexus.spark")
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
 
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
+from common.db_utils import get_db_config
+
+_db_cfg = get_db_config()
+PG_HOST = _db_cfg['host']
+PG_PORT = _db_cfg['port']
+PG_DB = _db_cfg['dbname']
+PG_USER = _db_cfg['user']
+PG_PASSWORD = _db_cfg['password']
 
 PG_URL = f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}"
 PG_PROPERTIES = {
@@ -111,18 +115,27 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
     import psycopg2
     from psycopg2.extras import execute_values
 
+    from psycopg2 import sql
     columns = batch_df.columns
-    col_list = ", ".join(columns)
-    constraint_str = ", ".join(constraint_cols)
-    update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+    col_names = sql.SQL(', ').join(sql.Identifier(col) for col in columns)
+    constraint_names = sql.SQL(', ').join(sql.Identifier(col) for col in constraint_cols)
+    update_actions = sql.SQL(', ').join(
+        sql.Composed([sql.Identifier(c), sql.SQL(" = EXCLUDED."), sql.Identifier(c)])
+        for c in update_cols
+    )
 
     def upsert_partition(rows):
         # Create a connection per partition on the executor
         conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
         try:
-            upsert_sql = (
-                f"INSERT INTO {table_name} ({col_list}) VALUES %s "
-                f"ON CONFLICT ({constraint_str}) DO UPDATE SET {update_str}"
+            upsert_query = sql.SQL("""
+                INSERT INTO {table} ({fields}) VALUES %s 
+                ON CONFLICT ({pk}) DO UPDATE SET {updates}
+            """).format(
+                table=sql.Identifier(table_name),
+                fields=col_names,
+                pk=constraint_names,
+                updates=update_actions
             )
             
             # Batch values into groups of 1000 for efficiency
@@ -131,7 +144,7 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
                 return
 
             with conn.cursor() as cur:
-                execute_values(cur, upsert_sql, partition_data, page_size=1000)
+                execute_values(cur, upsert_query, partition_data, page_size=1000)
             conn.commit()
         finally:
             conn.close()
@@ -191,6 +204,11 @@ def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
 
 
 def main() -> None:
+    # Start Prometheus metrics endpoint
+    metrics_port = int(os.getenv("METRICS_PORT", "9092"))
+    start_metrics_server(metrics_port)
+    logger.info("Spark metrics available on port %d", metrics_port)
+
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
     events = read_kafka_stream(spark)
@@ -233,8 +251,12 @@ def main() -> None:
         try:
             feats = batch_df.select(
                 "computed_at", "category", "region",
-                "revenue_last_5m", F.lit(0.0).alias("revenue_last_15m"), F.lit(0.0).alias("revenue_last_60m"),
-                "orders_last_5m", F.lit(0).alias("orders_last_15m"), F.lit(0).alias("orders_last_60m"),
+                F.col("revenue_last_5m"), 
+                F.col("revenue_last_5m").alias("revenue_last_15m"), 
+                F.col("revenue_last_5m").alias("revenue_last_60m"),
+                F.col("orders_last_5m"), 
+                F.col("orders_last_5m").alias("orders_last_15m"), 
+                F.col("orders_last_5m").alias("orders_last_60m"),
                 F.col("avg_order_value_last_5m").alias("avg_order_value_last_15m"),
                 F.lit(0.0).alias("revenue_trend_pct")
             )
@@ -245,12 +267,15 @@ def main() -> None:
             )
             
             # After writing new features, purge rows older than 2 hours
+            # Moved to a more efficient batching approach to minimize DB hits
             import psycopg2
             with psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD) as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM feature_store WHERE computed_at < NOW() - INTERVAL '2 hours'"
-                    )
+                    # Optimized: Only delete every 10 batches to reduce overhead
+                    if batch_id % 10 == 0:
+                        cur.execute(
+                            "DELETE FROM feature_store WHERE computed_at < NOW() - INTERVAL '2 hours'"
+                        )
                 conn.commit()
                 
             _features_health.record_success()

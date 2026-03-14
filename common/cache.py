@@ -49,4 +49,4 @@ class TTLCache:
         return decorator
 
 # Global cache shared across copilot tools. Limited to 1000 items to prevent leaks.
-_cache = TTLCache(default_ttl=300, max_size=1000)
+_cache = TTLCache(default_ttl=60, max_size=1000)

@@ -49,7 +49,7 @@ def load_config() -> Dict[str, Any]:
         
         # Dashboard Configuration
         'dashboard': {
-            'password': os.getenv("DASHBOARD_PASSWORD", "nexus_secure_pass_123"),
+            'password': os.getenv("DASHBOARD_PASSWORD", "CHANGE_ME_IN_PROD"),
         },
     }
 

@@ -64,7 +64,7 @@ class DeadLetterQueue:
                 # Partial index for fast lookups of pending work
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_dlq_pending 
-                    ON dlq_events (first_failed) WHERE resolved = FALSE AND retry_count < 10
+                    ON dlq_events (first_failed) WHERE resolved = FALSE AND retry_count < 5
                 """)
             conn.commit()
         finally:
@@ -163,6 +163,7 @@ class DeadLetterQueue:
                 logger.info("DLQ: Successfully re-ingested %d events", len(resolved))
                 
         except Exception as e:
+            conn.rollback()
             logger.error("DLQ retry logic failed: %s", e)
         finally:
             self._pool.putconn(conn)
@@ -176,5 +177,31 @@ class DeadLetterQueue:
 
     def stop(self):
         self._stop_event.set()
-        # Final flush attempt
-        self._writer_loop()
+        # Drain any remaining items to the database directly
+        batch = []
+        while not self._queue.empty():
+            try:
+                batch.append(self._queue.get_nowait())
+                if len(batch) >= 100:
+                    self._flush_batch(batch)
+                    batch = []
+            except queue.Empty:
+                break
+        if batch:
+            self._flush_batch(batch)
+
+    def _flush_batch(self, batch):
+        """Helper to flush a batch to the DB outside the main loop."""
+        if not batch: return
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO dlq_events (event_data, error) VALUES %s",
+                    [(json.dumps(e), err) for e, err in batch]
+                )
+            conn.commit()
+            logger.info("DLQ shutdown: Flushed final batch of %d failures", len(batch))
+        finally:
+            self._pool.putconn(conn)

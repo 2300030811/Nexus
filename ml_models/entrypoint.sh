@@ -13,7 +13,7 @@ echo "[3/4] Starting anomaly detection service ..."
 # Run drift monitor hourly in background
 while true; do
     echo "$(date) - Running drift monitor..."
-    python drift_monitor.py >> /var/log/drift_monitor.log 2>&1 || echo "Drift monitor failed, see logs"
+    python drift_monitor.py >> /tmp/drift_monitor.log 2>&1 || echo "Drift monitor failed, see logs in /tmp/drift_monitor.log"
     sleep 3600
 done &
 

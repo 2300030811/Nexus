@@ -16,7 +16,7 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at: float | None = None
         self._probe_allowed = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def state(self) -> State:

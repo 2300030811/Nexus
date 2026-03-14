@@ -39,12 +39,6 @@ logger = get_logger("nexus.retrain")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
-
 MODEL_DIR = Path("/app/model")
 MODEL_PATH = MODEL_DIR / "model.json"
 

@@ -52,11 +52,12 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
+_db_cfg = get_db_config()
+PG_HOST = _db_cfg['host']
+PG_PORT = _db_cfg['port']
+PG_DB = _db_cfg['dbname']
+PG_USER = _db_cfg['user']
+PG_PASSWORD = _db_cfg['password']
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))  # seconds
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/model/model.json")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")

@@ -21,11 +21,12 @@ from kafka.errors import NoBrokersAvailable
 
 from common.logging_utils import get_logger
 from common.metrics import (
-    EVENTS_PRODUCED, PRODUCE_ERRORS, SIMULATION_ACTIVE as SIMULATION_GAUGE,
+    EVENTS_PRODUCED, PRODUCE_ERRORS, PRODUCE_LATENCY,
+    SIMULATION_ACTIVE as SIMULATION_GAUGE,
     start_metrics_server,
 )
 from common.constants import PRODUCTS, REGIONS, PAYMENT_METHODS
-from common.db_utils import get_db_config
+from common.db_utils import get_db_config, get_single_connection, close_connection
 from dlq import DeadLetterQueue
 
 # ---------------------------------------------------------------------------
@@ -51,11 +52,12 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("PG_HOST", "postgres")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB = os.getenv("PG_DB", "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
+_db_config = get_db_config()
+PG_HOST = _db_config['host']
+PG_PORT = _db_config['port']
+PG_DB = _db_config['dbname']
+PG_USER = _db_config['user']
+PG_PASSWORD = _db_config['password']
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
@@ -194,11 +196,16 @@ def main() -> None:
             event = generate_order_event(simulate_stockout)
             # Set message key to region for partition ordering
             event_key = event["region"].encode("utf-8")
-            def on_success(record_metadata):
-                pass # Already printing periodic updates
+            
+            start_time = time.monotonic()
+            
+            def make_success_handler(start):
+                def on_success(record_metadata):
+                    PRODUCE_LATENCY.observe(time.monotonic() - start)
+                return on_success
             
             producer.send(KAFKA_TOPIC, key=event_key, value=event) \
-                .add_callback(on_success) \
+                .add_callback(make_success_handler(start_time)) \
                 .add_errback(make_error_handler(event, dlq))
             EVENTS_PRODUCED.labels(topic=KAFKA_TOPIC).inc()
             event_count += 1
@@ -213,6 +220,8 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Producer stopped after %d events", event_count)
     finally:
+        logger.info("Stopping DLQ writer/retry threads")
+        dlq.stop()
         logger.info("Flushing remaining messages")
         producer.flush()
         logger.info("Closing producer connection")

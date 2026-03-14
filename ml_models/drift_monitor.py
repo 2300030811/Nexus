@@ -30,11 +30,10 @@ PG_USER     = os.getenv("PG_USER", "nexus")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
 
 
+from common.db_utils import get_single_connection, close_connection
+
 def get_conn():
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASSWORD, connect_timeout=5,
-    )
+    return get_single_connection()
 
 
 
@@ -76,7 +75,7 @@ def load_baseline_distribution(metadata_path: str) -> dict | None:
 
 def compute_drift(conn, window_hours: int = 24) -> dict:
     """Compute drift metrics for the last N hours vs baseline."""
-    cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
 
     # Fetch recent scored windows
     with conn.cursor(cursor_factory=RealDictCursor) as cur:

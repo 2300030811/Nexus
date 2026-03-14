@@ -5,51 +5,25 @@
 -- Table Partitioning for order_events
 -- =============================================================================
 
--- Convert order_events to a partitioned table (requires recreation)
--- This script assumes the table is empty or you're running it during setup
-
--- Step 1: Rename existing table (if running on existing data)
--- ALTER TABLE order_events RENAME TO order_events_old;
-
--- Step 2: Create partitioned table
-CREATE TABLE IF NOT EXISTS order_events_partitioned (
-    event_id VARCHAR(64) PRIMARY KEY,
-    event_type VARCHAR(32) NOT NULL,
-    event_timestamp TIMESTAMPTZ NOT NULL,
-    order_id VARCHAR(64) NOT NULL,
-    product_id VARCHAR(32) NOT NULL,
-    product_name VARCHAR(128) NOT NULL,
-    category VARCHAR(32) NOT NULL,
-    quantity INTEGER NOT NULL,
-    unit_price NUMERIC(10, 2) NOT NULL,
-    total_amount NUMERIC(12, 2) NOT NULL,
-    region VARCHAR(32) NOT NULL,
-    payment_method VARCHAR(32) NOT NULL,
-    ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-) PARTITION BY RANGE (event_timestamp);
+-- The order_events table is now partitioned by default in init.sql.
+-- These helper functions will apply to 'order_events'.
 
 -- Create monthly partitions for the current year + 3 months ahead
-CREATE TABLE IF NOT EXISTS order_events_2026_03 PARTITION OF order_events_partitioned
+CREATE TABLE IF NOT EXISTS order_events_2026_03 PARTITION OF order_events
     FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
 
-CREATE TABLE IF NOT EXISTS order_events_2026_04 PARTITION OF order_events_partitioned
+CREATE TABLE IF NOT EXISTS order_events_2026_04 PARTITION OF order_events
     FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
 
-CREATE TABLE IF NOT EXISTS order_events_2026_05 PARTITION OF order_events_partitioned
+CREATE TABLE IF NOT EXISTS order_events_2026_05 PARTITION OF order_events
     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
 
-CREATE TABLE IF NOT EXISTS order_events_2026_06 PARTITION OF order_events_partitioned
+CREATE TABLE IF NOT EXISTS order_events_2026_06 PARTITION OF order_events
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 
--- Create indexes on partitioned table
-CREATE INDEX IF NOT EXISTS idx_partitioned_event_timestamp 
-    ON order_events_partitioned (event_timestamp);
-CREATE INDEX IF NOT EXISTS idx_partitioned_category 
-    ON order_events_partitioned (category);
-CREATE INDEX IF NOT EXISTS idx_partitioned_region 
-    ON order_events_partitioned (region);
-CREATE INDEX IF NOT EXISTS idx_partitioned_ingested_at 
-    ON order_events_partitioned (ingested_at);
+-- Create indexes on partitions are automatic in Newer PG, but we can index the parent
+CREATE INDEX IF NOT EXISTS idx_order_events_timestamp_partitioned 
+    ON order_events (event_timestamp);
 
 -- Step 3: Migrate data from old table (if needed)
 -- INSERT INTO order_events_partitioned SELECT * FROM order_events_old;
@@ -80,7 +54,7 @@ BEGIN
         SELECT 1 FROM pg_class WHERE relname = partition_name
     ) THEN
         EXECUTE FORMAT(
-            'CREATE TABLE %I PARTITION OF order_events_partitioned FOR VALUES FROM (%L) TO (%L)',
+            'CREATE TABLE %I PARTITION OF order_events FOR VALUES FROM (%L) TO (%L)',
             partition_name,
             start_date,
             end_date
@@ -98,7 +72,7 @@ $$ LANGUAGE plpgsql;
 
 -- Create archive table for old events (cold storage)
 CREATE TABLE IF NOT EXISTS order_events_archive (
-    LIKE order_events_partitioned INCLUDING ALL
+    LIKE order_events INCLUDING ALL
 );
 
 -- Function to archive events older than N days
@@ -109,7 +83,7 @@ DECLARE
 BEGIN
     -- Move old events to archive
     WITH moved AS (
-        DELETE FROM order_events_partitioned
+        DELETE FROM order_events
         WHERE event_timestamp < NOW() - MAKE_INTERVAL(days => days_threshold)
         RETURNING *
     )

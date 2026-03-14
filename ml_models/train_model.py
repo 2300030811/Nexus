@@ -99,7 +99,6 @@ def main():
     X, y = load_and_prepare(DATA_PATH)
     model, metrics = train(X, y)
 
-    from common.constants import CATEGORY_MAP, REGION_MAP, FEATURE_COLUMNS
     save_versioned_model(
         model,
         model_dir=Path(MODEL_PATH).parent,
