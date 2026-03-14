@@ -68,9 +68,6 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 
 from common.db_utils import get_single_connection, close_connection
 
-def get_connection():
-    """Create a new PostgreSQL connection with timeout (using shared util)."""
-    return get_single_connection()
 
 
 # Removed ensure_anomalies_table - handled by init.sql
@@ -99,7 +96,7 @@ def fetch_recent_metrics(conn, lookback_minutes: int = 10) -> pd.DataFrame:
         SELECT rm.window_start, rm.window_end, rm.category, rm.region,
                rm.order_count, rm.total_revenue, rm.avg_order_value
         FROM revenue_metrics rm
-        WHERE rm.window_start >= NOW() - INTERVAL '%s minutes'
+        WHERE rm.window_start >= NOW() - (%s * INTERVAL '1 minute')
           AND NOT EXISTS (
               SELECT 1 FROM anomalies a
               WHERE a.window_start = rm.window_start
@@ -222,7 +219,7 @@ def main() -> None:
     model = load_model(MODEL_PATH)
     last_model_mtime = os.path.getmtime(MODEL_PATH)
 
-    conn = get_connection()
+    conn = get_single_connection()
     # ensure_anomalies_table(conn)
     logger.info("Scanning every %ds for anomalies", SCAN_INTERVAL)
 
@@ -280,7 +277,7 @@ def main() -> None:
                 pass
             time.sleep(reconnect_backoff)
             try:
-                conn = get_connection()
+                conn = get_single_connection()
                 logger.info("Reconnected to database")
                 reconnect_backoff = 1  # Reset on successful reconnect
             except psycopg2.OperationalError as reconnect_err:

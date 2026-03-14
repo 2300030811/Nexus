@@ -25,6 +25,15 @@ def run_migrations(conn):
         cur.execute("SELECT version FROM schema_migrations")
         applied = {row[0] for row in cur.fetchall()}
 
+    # Validate unique versions in files
+    versions_found = {}
+    for path in files:
+        filename = os.path.basename(path)
+        version = filename.split("__")[0]
+        if version in versions_found:
+            raise RuntimeError(f"Duplicate migration version found: {version} ({versions_found[version]} and {filename})")
+        versions_found[version] = filename
+
     for path in files:
         filename = os.path.basename(path)
         version = filename.split("__")[0]   # e.g. "V001"

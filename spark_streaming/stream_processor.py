@@ -111,15 +111,15 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
     import psycopg2
     from psycopg2.extras import execute_values
 
+    columns = batch_df.columns
+    col_list = ", ".join(columns)
+    constraint_str = ", ".join(constraint_cols)
+    update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+
     def upsert_partition(rows):
         # Create a connection per partition on the executor
         conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
         try:
-            columns = batch_df.columns
-            col_list = ", ".join(columns)
-            constraint_str = ", ".join(constraint_cols)
-            update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
-
             upsert_sql = (
                 f"INSERT INTO {table_name} ({col_list}) VALUES %s "
                 f"ON CONFLICT ({constraint_str}) DO UPDATE SET {update_str}"
@@ -137,8 +137,9 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
             conn.close()
         yield True # Return a dummy value to satisfy mapPartitions
 
-    # Execute in parallel on Spark clusters
-    batch_df.foreachPartition(upsert_partition)
+    # Scale optimization: Reduce partitions before writing to DB to avoid connection overhead
+    # For this workload size, 1 partition is optimal. For TB-scale, increase this.
+    batch_df.coalesce(1).foreachPartition(upsert_partition)
 
 # ---------------------------------------------------------------------------
 # Sinks with Health Tracking
@@ -188,72 +189,6 @@ def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
         if not _metrics_health.is_healthy:
             raise
 
-def write_features_batch(batch_df: DataFrame, batch_id: int) -> None:
-    """Compute and write feature store with error handling."""
-    if batch_df.isEmpty():
-        return
-
-    try:
-        spark = batch_df.sparkSession
-        now_ts = datetime.now(timezone.utc)
-        cutoff = (now_ts - timedelta(minutes=60)).strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Use predicate pushdown to filter on the DB side
-        try:
-            predicate = f"event_timestamp >= '{cutoff}'::timestamptz"
-            all_events = spark.read.jdbc(
-                url=PG_URL, table="order_events",
-                predicates=[predicate], properties=PG_PROPERTIES
-            )
-        except Exception as read_err:
-            logger.warning("Failed to read order_events for feature batch %d: %s", batch_id, read_err)
-            return  # Skip this batch
-        
-        if all_events.isEmpty():
-            logger.debug("No recent events for feature batch %d", batch_id)
-            return
-
-        spark_now = F.current_timestamp()
-
-        def agg_window(df, minutes, prefix):
-            return (
-                df.filter(F.col("event_timestamp") >= spark_now - F.expr(f"INTERVAL {minutes} MINUTES"))
-                .groupBy("category", "region")
-                .agg(
-                    F.round(F.sum("total_amount"), 2).alias(f"revenue_last_{prefix}"),
-                    F.count("order_id").alias(f"orders_last_{prefix}"),
-                    F.round(F.avg("total_amount"), 2).alias(f"avg_order_value_last_{prefix}"),
-                )
-            )
-
-        w5  = agg_window(all_events, 5,  "5m")
-        w15 = agg_window(all_events, 15, "15m")
-        w60 = agg_window(all_events, 60, "60m")
-
-        features = (
-            w60.join(w15, on=["category", "region"], how="left")
-            .join(w5, on=["category", "region"], how="left")
-            .fillna(0)
-            .withColumn("computed_at", spark_now)
-            .withColumn("revenue_trend_pct", 
-                        F.when(F.col("revenue_last_15m") > 0, 
-                               F.round(F.col("revenue_last_5m") / F.col("revenue_last_15m"), 4))
-                        .otherwise(0.0))
-            .select(
-                "computed_at", "category", "region",
-                "revenue_last_5m", "revenue_last_15m", "revenue_last_60m",
-                "orders_last_5m", "orders_last_15m", "orders_last_60m",
-                "avg_order_value_last_15m",
-                "revenue_trend_pct"
-            )
-        )
-        
-        # feature_store PK is (computed_at, category, region) but computed_at is always unique
-        features.write.jdbc(url=PG_URL, table="feature_store", mode="append", properties=PG_PROPERTIES)
-        logger.info("Batch %d: wrote %d feature rows", batch_id, features.count())
-    except Exception as e:
-        logger.error("Failed to write features batch %d: %s", batch_id, e)
-        # Don't re-raise; let the streaming query continue
 
 def main() -> None:
     spark = create_spark_session()
@@ -303,7 +238,11 @@ def main() -> None:
                 F.col("avg_order_value_last_5m").alias("avg_order_value_last_15m"),
                 F.lit(0.0).alias("revenue_trend_pct")
             )
-            feats.write.jdbc(url=PG_URL, table="feature_store", mode="append", properties=PG_PROPERTIES)
+            execute_upsert(
+                feats, "feature_store",
+                ["computed_at", "category", "region"],
+                ["revenue_last_5m", "orders_last_5m", "avg_order_value_last_15m"]
+            )
             _features_health.record_success()
         except Exception as e:
             _features_health.record_failure(e)

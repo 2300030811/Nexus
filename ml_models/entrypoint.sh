@@ -12,7 +12,8 @@ python train_model.py
 echo "[3/4] Starting anomaly detection service ..."
 # Run drift monitor hourly in background
 while true; do
-    python drift_monitor.py
+    echo "$(date) - Running drift monitor..."
+    python drift_monitor.py >> /var/log/drift_monitor.log 2>&1 || echo "Drift monitor failed, see logs"
     sleep 3600
 done &
 

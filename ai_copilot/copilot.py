@@ -29,6 +29,7 @@ from tools import (
     query_recent_order_trend, query_payment_method_breakdown,
 )
 from common.logging_utils import get_logger
+from common.db_utils import get_connection_pool
 from common.metrics import (
     INVESTIGATIONS_TOTAL, INVESTIGATION_ERRORS, LLM_RESPONSE_TIME,
     REPORTS_SAVED, DB_RECONNECTS, start_metrics_server,
@@ -368,7 +369,13 @@ def main() -> None:
     while not shutdown_flag:
         try:
             scan_count += 1
-            anomalies = fetch_uninvestigated_anomalies(conn)
+            pool = get_connection_pool(minconn=1, maxconn=5)
+            conn = pool.getconn()
+            try:
+                anomalies = fetch_uninvestigated_anomalies(conn)
+            finally:
+                pool.putconn(conn)
+            
             reconnect_backoff = 1  # Reset on successful query
 
             if not anomalies:
@@ -378,6 +385,7 @@ def main() -> None:
                 logger.info("Scan #%d: Found %d anomalies to investigate", scan_count, len(anomalies))
 
                 def process_anomaly(anomaly):
+                    worker_conn = pool.getconn()
                     try:
                         INVESTIGATIONS_TOTAL.inc()
                         with LLM_RESPONSE_TIME.time():
@@ -386,7 +394,7 @@ def main() -> None:
                             return
                         parsed = parse_report(report, anomaly)
 
-                        save_report(conn, anomaly, report, parsed)
+                        save_report(worker_conn, anomaly, report, parsed)
                         REPORTS_SAVED.inc()
                         logger.info("Anomaly #%d – report saved | cause: %s | confidence: %.2f | loss: ₹%.2f",
                                    anomaly['id'], parsed['root_cause'][:120],
@@ -394,6 +402,8 @@ def main() -> None:
                     except Exception as e:
                         INVESTIGATION_ERRORS.inc()
                         logger.error("Failed to investigate anomaly #%d: %s", anomaly['id'], e)
+                    finally:
+                        pool.putconn(worker_conn)
 
                 with ThreadPoolExecutor(max_workers=3) as executor:
                     futures = [executor.submit(process_anomaly, anomaly) for anomaly in anomalies]
@@ -424,11 +434,9 @@ def main() -> None:
         time.sleep(SCAN_INTERVAL)
     
     # Cleanup on shutdown
-    logger.info("Closing database connection")
-    try:
-        conn.close()
-    except Exception:
-        pass
+    logger.info("Closing database pool")
+    from common.db_utils import close_connection_pool
+    close_connection_pool()
     logger.info("AI Copilot stopped after %d scans", scan_count)
 
 

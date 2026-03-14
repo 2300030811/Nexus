@@ -26,7 +26,7 @@ from common.metrics import (
 )
 from common.constants import PRODUCTS, REGIONS, PAYMENT_METHODS
 from common.db_utils import get_db_config
-from .dlq import DeadLetterQueue
+from dlq import DeadLetterQueue
 
 # ---------------------------------------------------------------------------
 # Structured logging (via shared utility)
@@ -85,38 +85,39 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
 
 from common.db_utils import get_single_connection, close_connection
 
-_sim_conn: psycopg2.extensions.connection | None = None
+class SimulationState:
+    def __init__(self):
+        self._conn = None
 
-def _get_sim_conn():
-    """Return a persistent connection, reconnecting if necessary."""
-    global _sim_conn
-    if _sim_conn is None or _sim_conn.closed:
+    def get_conn(self):
+        """Return a persistent connection, reconnecting if necessary."""
+        if self._conn is None or self._conn.closed:
+            try:
+                self._conn = get_single_connection()
+            except Exception:
+                self._conn = None
+        return self._conn
+
+    def check_mode(self) -> bool:
+        """Check simulate_stockout flag using a persistent connection."""
+        conn = self.get_conn()
+        if conn is None:
+            return False
         try:
-            _sim_conn = get_single_connection()
-        except Exception:
-            _sim_conn = None
-    return _sim_conn
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM app_config WHERE key = 'simulate_stockout'"
+                )
+                res = cur.fetchone()
+                return res[0].lower() == "true" if res else False
+        except Exception as e:
+            logger.warning("Simulation mode check failed: %s", e)
+            if conn:
+                close_connection(conn)
+            self._conn = None
+            return False
 
-
-def check_simulation_mode() -> bool:
-    """Check simulate_stockout flag using a persistent connection."""
-    conn = _get_sim_conn()
-    if conn is None:
-        return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT value FROM app_config WHERE key = 'simulate_stockout'"
-            )
-            res = cur.fetchone()
-            return res[0].lower() == "true" if res else False
-    except Exception as e:
-        logger.warning("Simulation mode check failed: %s", e)
-        # Force reconnect next call
-        close_connection(conn)
-        global _sim_conn
-        _sim_conn = None
-        return False
+_sim_state = SimulationState()
 
 
 def generate_order_event(simulate_stockout: bool = False) -> dict:
@@ -185,7 +186,7 @@ def main() -> None:
         while not shutdown_flag:
             # Refresh simulation mode every 20 events (~10 seconds)
             if event_count % 20 == 0:
-                simulate_stockout = check_simulation_mode()
+                simulate_stockout = _sim_state.check_mode()
                 SIMULATION_GAUGE.set(1 if simulate_stockout else 0)
                 if simulate_stockout:
                     logger.info("Simulation active: High-value Electronics stockout")

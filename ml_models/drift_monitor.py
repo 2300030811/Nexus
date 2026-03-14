@@ -37,23 +37,6 @@ def get_conn():
     )
 
 
-def ensure_drift_table(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS model_drift_log (
-                id              SERIAL PRIMARY KEY,
-                measured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                window_hours    INTEGER NOT NULL,
-                anomaly_rate    NUMERIC(6,4) NOT NULL,
-                avg_score       NUMERIC(6,4) NOT NULL,
-                score_std       NUMERIC(6,4) NOT NULL,
-                psi_revenue     NUMERIC(8,6),
-                psi_order_count NUMERIC(8,6),
-                drift_flag      BOOLEAN NOT NULL DEFAULT FALSE,
-                notes           TEXT
-            )
-        """)
-    conn.commit()
 
 
 def population_stability_index(expected: np.ndarray, actual: np.ndarray,
@@ -132,7 +115,7 @@ def compute_drift(conn, window_hours: int = 24) -> dict:
             SELECT total_revenue, order_count
             FROM revenue_metrics
             WHERE window_start >= NOW() - INTERVAL '7 days'
-              AND window_start <  NOW() - INTERVAL '%s hours'
+              AND window_start <  NOW() - (%s * INTERVAL '1 hour')
             LIMIT 5000
         """, (window_hours,))
         baseline_rows = cur.fetchall()
@@ -222,7 +205,6 @@ def log_drift(conn, window_hours: int, metrics: dict):
 
 def run_once():
     conn = get_conn()
-    ensure_drift_table(conn)
     metrics = compute_drift(conn, window_hours=24)
     log_drift(conn, 24, metrics)
     conn.close()

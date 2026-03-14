@@ -10,16 +10,15 @@ KNOWN_BAD = {
 def validate():
     errors = []
     env = os.environ.get("ENV", "development")
-    if env == "development":
-        return  # only enforce in production
 
     for var, bad_values in KNOWN_BAD.items():
         val = os.getenv(var, "")
         if val in bad_values:
-            errors.append(
-                f"  {var} is set to a known default value '{val}'. "
-                f"Set a strong secret before deploying."
-            )
+            msg = f"  {var} is set to a known default value '{val}'. Set a strong secret before deploying."
+            if env == "development":
+                print(f"WARNING: {msg}", file=sys.stderr)
+            else:
+                errors.append(msg)
 
     if errors:
         print("STARTUP ABORTED — insecure configuration detected:", file=sys.stderr)

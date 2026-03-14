@@ -180,7 +180,7 @@ def get_recent_order_trend(minutes: int = 15) -> str:
                COUNT(*) as orders,
                SUM(total_amount) as revenue
         FROM order_events
-        WHERE event_timestamp >= NOW() - INTERVAL '%s minutes'
+        WHERE event_timestamp >= NOW() - (%s * INTERVAL '1 minute')
         GROUP BY minute
         ORDER BY minute DESC;
     """, (minutes,))

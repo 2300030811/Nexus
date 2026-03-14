@@ -60,4 +60,6 @@ __all__ = [
     # DB
     "get_db_config", "get_connection_pool", "get_single_connection",
     "close_connection", "close_connection_pool",
+    # Cache
+    "TTLCache", "_cache",
 ]

@@ -19,7 +19,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return await call_next(request)
 
-        client = request.client.host if request.client else "unknown"
+        # Try to get client IP from X-Forwarded-For (for proxies)
+        client = request.headers.get("X-Forwarded-For")
+        if client:
+            client = client.split(",")[0].strip()
+        else:
+            client = request.client.host if request.client else "unknown"
         now = time.time()
         window_start = now - 60.0
 

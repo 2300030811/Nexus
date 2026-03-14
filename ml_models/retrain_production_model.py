@@ -29,6 +29,7 @@ from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
     get_hour_factor, get_dow_factor, FEATURE_COLUMNS
 )
+from common.db_utils import get_single_connection, close_connection
 from common.model_utils import save_versioned_model
 
 from common.logging_utils import get_logger
@@ -48,13 +49,6 @@ MODEL_DIR = Path("/app/model")
 MODEL_PATH = MODEL_DIR / "model.json"
 
 
-def get_connection():
-    """Create database connection."""
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASSWORD,
-        connect_timeout=10
-    )
 
 
 def extract_training_data(days: int = 30) -> pd.DataFrame:
@@ -63,7 +57,7 @@ def extract_training_data(days: int = 30) -> pd.DataFrame:
     
     Combines revenue_metrics with confirmed anomalies to create labeled training data.
     """
-    conn = get_connection()
+    conn = get_single_connection()
     
     # Query to join revenue_metrics with anomalies (labeled data)
     query = """
@@ -82,14 +76,14 @@ def extract_training_data(days: int = 30) -> pd.DataFrame:
                 ON rm.window_start = a.window_start 
                 AND rm.category = a.category 
                 AND rm.region = a.region
-            WHERE rm.window_start >= NOW() - INTERVAL '%s days'
+            WHERE rm.window_start >= NOW() - (%s * INTERVAL '1 day')
         )
         SELECT * FROM labeled_windows
         ORDER BY window_start;
     """
     
     df = pd.read_sql(query, conn, params=(days,))
-    conn.close()
+    close_connection(conn)
     
     logger.info("Extracted %d windows from last %d days", len(df), days)
     logger.info("Anomalies: %d (%.2f%%)", df['is_anomaly'].sum(), df['is_anomaly'].mean()*100)

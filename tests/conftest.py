@@ -29,10 +29,6 @@ sys.modules["pyspark.sql"] = MagicMock()
 sys.modules["pyspark.sql.functions"] = MagicMock()
 sys.modules["pyspark.sql.types"] = MagicMock()
 sys.modules["requests"] = MagicMock()
-sys.modules["streamlit_autorefresh"] = MagicMock()
-sys.modules["plotly"] = MagicMock()
-sys.modules["plotly.express"] = MagicMock()
-sys.modules["plotly.graph_objects"] = MagicMock()
 
 
 @pytest.fixture

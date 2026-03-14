@@ -39,8 +39,14 @@ run_sql_file() {
 # Create tracking table if not exists
 psql -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(10) PRIMARY KEY, filename TEXT NOT NULL, applied_at TIMESTAMPTZ DEFAULT NOW())"
 
+# Check for duplicate version numbers BEFORE applying any
+duplicates=$(ls /docker-entrypoint-initdb.d/migrations/V*.sql | xargs -n1 basename | cut -d'_' -f1 | sort | uniq -d)
+if [ -n "$duplicates" ]; then
+    echo "ERROR: Duplicate migration versions found: $duplicates"
+    exit 1
+fi
+
 # Find and run all V*.sql files in order
-# They are mounted at /docker-entrypoint-initdb.d/migrations
 for f in $(ls /docker-entrypoint-initdb.d/migrations/V*.sql | sort); do
     run_sql_file "$f"
 done

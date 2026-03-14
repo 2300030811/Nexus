@@ -85,7 +85,7 @@ def load_kpis(minutes: int) -> dict:
         # OPTIMIZATION: Use revenue_metrics instead of scanning order_events
         row = run_query("""
             SELECT SUM(order_count) as total_orders, SUM(total_revenue) as total_revenue
-            FROM revenue_metrics WHERE window_end >= NOW() - INTERVAL '%s minutes'
+            FROM revenue_metrics WHERE window_end >= NOW() - (%s * INTERVAL '1 minute')
         """, (minutes,))
         
         anom = run_query("SELECT COUNT(*) as count FROM anomalies WHERE status = 'open'")
@@ -294,7 +294,7 @@ st.subheader("Revenue Trend (5-Min Windows)")
 df_trend = run_query("""
     SELECT window_start, SUM(total_revenue) as total_rev 
     FROM revenue_metrics 
-    WHERE window_start >= NOW() - INTERVAL '%s minutes' 
+    WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') 
     GROUP BY window_start 
     ORDER BY window_start
 """, (lookback,))
@@ -311,7 +311,7 @@ else:
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("Category Revenue")
-    df_cat = run_query("SELECT category, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - INTERVAL '%s minutes' GROUP BY category ORDER BY rev DESC", (lookback,))
+    df_cat = run_query("SELECT category, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY category ORDER BY rev DESC", (lookback,))
     if not df_cat.empty:
         fig_cat = px.bar(df_cat, x='category', y='rev', 
                          labels={'category': 'Category', 'rev': 'Revenue (₹)'},
@@ -323,7 +323,7 @@ with c1:
         st.info("No category data")
 with c2:
     st.subheader("Regional Revenue")
-    df_reg = run_query("SELECT region, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - INTERVAL '%s minutes' GROUP BY region ORDER BY rev DESC", (lookback,))
+    df_reg = run_query("SELECT region, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY region ORDER BY rev DESC", (lookback,))
     if not df_reg.empty:
         fig_reg = px.bar(df_reg, x='region', y='rev',
                          labels={'region': 'Region', 'rev': 'Revenue (₹)'},
@@ -350,20 +350,24 @@ if not anoms.empty:
         cat = escape(str(row['category']))
         reg = escape(str(row['region']))
         sev = escape(str(row['severity'])).upper()
+        det = escape(row['detected_at'].strftime("%H:%M:%S"))
+        act = escape(f"₹{actual:,.2f}")
+        exp = escape(f"₹{expected:,.2f}")
+        scr = escape(f"{row['anomaly_score']:.2f}")
         
         st.markdown(f"""
             <div style="border-left: 5px solid {color}; padding: 15px; background: rgba(30, 30, 30, 0.6); margin-bottom: 15px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
                     <div style="font-size: 1.1em;">{icon} <b style="color:{color}">{sev}</b> Anomaly detected in <b>{cat}</b> (Region: {reg})</div>
-                    <div style="color: #888; font-size: 0.9em;">{row['detected_at'].strftime("%H:%M:%S")}</div>
+                    <div style="color: #888; font-size: 0.9em;">{det}</div>
                 </div>
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
-                        <span style="color:#aaa;">Actual:</span> <span style="font-weight:bold;">₹{actual:,.2f}</span> &nbsp;|&nbsp; 
-                        <span style="color:#aaa;">Expected:</span> <span>₹{expected:,.2f}</span>
+                        <span style="color:#aaa;">Actual:</span> <span style="font-weight:bold;">{act}</span> &nbsp;|&nbsp; 
+                        <span style="color:#aaa;">Expected:</span> <span>{exp}</span>
                     </div>
                     <div>{drop_text}</div>
-                    <div style="color:#aaa; font-style:italic;">Score: {row['anomaly_score']:.2f}</div>
+                    <div style="color:#aaa; font-style:italic;">Score: {scr}</div>
                 </div>
             </div>
         """, unsafe_allow_html=True)

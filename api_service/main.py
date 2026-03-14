@@ -119,7 +119,7 @@ def get_kpis(
             cur.execute("""
                 SELECT SUM(order_count), SUM(total_revenue)
                 FROM revenue_metrics
-                WHERE window_end >= NOW() - INTERVAL '%s minutes'
+                WHERE window_end >= NOW() - (%s * INTERVAL '1 minute')
             """, (minutes,))
             orders, revenue = cur.fetchone()
             

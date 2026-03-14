@@ -1,4 +1,6 @@
 -- data_warehouse/migrations/V003__add_config_audit.sql
+-- NOTE: This trigger only audits UPDATES. The initial seed in V001 is NOT 
+-- recorded in the audit log unless it is updated after this trigger is created.
 CREATE TABLE IF NOT EXISTS app_config_audit (
     id          SERIAL PRIMARY KEY,
     key         VARCHAR(64) NOT NULL,
