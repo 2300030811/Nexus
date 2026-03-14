@@ -19,7 +19,7 @@ BEGIN
         SELECT 1 FROM pg_class WHERE relname = partition_name
     ) THEN
         EXECUTE FORMAT(
-            'CREATE TABLE %I PARTITION OF order_events_partitioned FOR VALUES FROM (%L) TO (%L)',
+            'CREATE TABLE %I PARTITION OF order_events FOR VALUES FROM (%L) TO (%L)',
             partition_name,
             start_date,
             end_date

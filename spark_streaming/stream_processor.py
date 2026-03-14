@@ -243,6 +243,16 @@ def main() -> None:
                 ["computed_at", "category", "region"],
                 ["revenue_last_5m", "orders_last_5m", "avg_order_value_last_15m"]
             )
+            
+            # After writing new features, purge rows older than 2 hours
+            import psycopg2
+            with psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM feature_store WHERE computed_at < NOW() - INTERVAL '2 hours'"
+                    )
+                conn.commit()
+                
             _features_health.record_success()
         except Exception as e:
             _features_health.record_failure(e)

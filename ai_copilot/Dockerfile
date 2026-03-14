@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY common/ /app/common/
 COPY ai_copilot/tools.py .
+COPY ai_copilot/circuit_breaker.py .
 COPY ai_copilot/copilot.py .
 COPY scripts/ /app/scripts/
 

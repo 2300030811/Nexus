@@ -2,23 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install python dependencies
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    psycopg2 \
-    pydantic
+COPY api_service/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy common module and API code
 COPY common/ /app/common/
 COPY scripts/ /app/scripts/
 COPY api_service/main.py /app/main.py
+COPY api_service/rate_limit.py /app/rate_limit.py
 
 RUN python /app/scripts/validate_secrets.py || exit 1
 

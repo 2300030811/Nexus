@@ -1,4 +1,4 @@
--- data_warehouse/migrations/V005__dlq_events.sql
+-- data_warehouse/migrations/V006__dlq_events.sql
 CREATE TABLE IF NOT EXISTS dlq_events (
     id           SERIAL PRIMARY KEY,
     event_data   JSONB NOT NULL,

@@ -1,4 +1,4 @@
--- data_warehouse/migrations/V004__model_drift_log.sql
+-- data_warehouse/migrations/V005__model_drift_log.sql
 CREATE TABLE IF NOT EXISTS model_drift_log (
     id              SERIAL PRIMARY KEY,
     measured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),

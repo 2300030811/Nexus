@@ -14,27 +14,14 @@ from psycopg2.extras import RealDictCursor
 from langchain_core.tools import tool
 
 from common.logging_utils import get_logger
-from common.db_utils import get_db_config
+from common.db_utils import get_connection_pool
 from common.cache import _cache
 
 logger = get_logger("nexus.copilot.tools")
 
-# ---------------------------------------------------------------------------
-# Connection pool (thread-safe, enables concurrent queries)
-# ---------------------------------------------------------------------------
-_pool = None
-
-
 def _get_pool():
-    """Get or create a module-level connection pool."""
-    global _pool
-    if _pool is None:
-        db_cfg = get_db_config()
-        _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1, maxconn=5, **db_cfg
-        )
-        logger.info("Connection pool created (min=1, max=5)")
-    return _pool
+    """Get the shared connection pool."""
+    return get_connection_pool(minconn=1, maxconn=5)
 
 
 def _query(sql: str, params: tuple = ()) -> list[dict]:

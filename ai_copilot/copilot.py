@@ -94,12 +94,6 @@ Recommended Action: <specific actions>
 ANOMALY_REPORT_END"""
 
 
-def get_connection():
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASSWORD,
-    )
-
 
 # Removed ensure_reports_table - handled by init.sql
 
@@ -356,8 +350,6 @@ def main() -> None:
 
     wait_for_ollama()
 
-    conn = get_connection()
-
     llm = create_llm()
     llm_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=300, name="ollama")
     logger.info("Copilot scanning for anomalies every %ds", SCAN_INTERVAL)
@@ -365,11 +357,11 @@ def main() -> None:
     scan_count = 0
     reconnect_backoff = 1  # seconds for exponential backoff
     max_backoff = 60
+    pool = get_connection_pool(minconn=1, maxconn=5)
     
     while not shutdown_flag:
         try:
             scan_count += 1
-            pool = get_connection_pool(minconn=1, maxconn=5)
             conn = pool.getconn()
             try:
                 anomalies = fetch_uninvestigated_anomalies(conn)
@@ -413,21 +405,12 @@ def main() -> None:
                         except Exception as e:
                             logger.error("Parallel investigation worker failed: %s", e)
 
+        except psycopg2.pool.PoolError as pool_err:
+            logger.error("Database pool exhausted: %s", pool_err)
         except psycopg2.OperationalError as db_err:
             DB_RECONNECTS.labels(service="ai-copilot").inc()
-            logger.error("Lost DB connection, waiting %ds before retry: %s", reconnect_backoff, db_err)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            logger.error("Database error, pool will handle reconnect: %s", db_err)
             time.sleep(reconnect_backoff)
-            try:
-                conn = get_connection()
-                logger.info("Reconnected to database")
-                reconnect_backoff = 1  # Reset
-            except psycopg2.OperationalError as reconnect_err:
-                logger.error("Reconnection failed: %s", reconnect_err)
-                reconnect_backoff = min(reconnect_backoff * 2, max_backoff)
         except Exception as e:
             logger.error("Unexpected error: %s", e)
 

@@ -15,23 +15,31 @@ class CircuitBreaker:
         self._state = State.CLOSED
         self._failures = 0
         self._opened_at: float | None = None
+        self._probe_allowed = False
         self._lock = threading.Lock()
 
     @property
     def state(self) -> State:
         with self._lock:
             if self._state == State.OPEN:
-                if time.monotonic() - self._opened_at >= self.timeout:
+                if self._opened_at is not None and time.monotonic() - self._opened_at >= self.timeout:
                     self._state = State.HALF
+                    self._probe_allowed = True
             return self._state
 
     def call(self, fn, *args, **kwargs):
-        s = self.state
-        if s == State.OPEN:
-            raise RuntimeError(
-                f"Circuit breaker [{self.name}] is OPEN. "
-                f"Retrying in {int(self.timeout - (time.monotonic() - self._opened_at))}s"
-            )
+        with self._lock:
+            s = self.state
+            if s == State.OPEN:
+                remaining = int(self.timeout - (time.monotonic() - (self._opened_at or 0)))
+                raise RuntimeError(
+                    f"Circuit breaker [{self.name}] is OPEN. "
+                    f"Retrying in {remaining}s"
+                )
+            if s == State.HALF:
+                if not self._probe_allowed:
+                    raise RuntimeError("Circuit half-open, probe already in flight")
+                self._probe_allowed = False
         try:
             result = fn(*args, **kwargs)
             self._on_success()

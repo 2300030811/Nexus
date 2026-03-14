@@ -135,7 +135,7 @@ Spark also downloads these JARs at runtime via `--packages`:
 
 ## Environment Variables
 
-All environment variables are defined in `infrastructure/docker-compose.yml`. No `.env` file is needed.
+All services require a `.env` file to run properly (each has `env_file: ../.env` defined in `docker-compose.yml`). You MUST copy the provided `.env.example` to `.env` before starting the services.
 
 | Variable            | Value            | Used By                    |
 |---------------------|------------------|----------------------------|

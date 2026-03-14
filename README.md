@@ -143,7 +143,7 @@ make kafka-reset-full
 
 1. Zookeeper → Kafka → health check passes
 2. PostgreSQL starts, runs `init.sql` schema migration
-3. `kafka-init` creates the `order_events` topic (3 partitions)
+3. `kafka-init` creates the `order_events` topic (6 partitions)
 4. Producer begins streaming order events
 5. Spark connects to Kafka + PostgreSQL, starts 3 streaming queries
 6. Anomaly detector generates training data, trains XGBoost, enters scoring loop
