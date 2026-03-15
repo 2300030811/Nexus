@@ -41,9 +41,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 dq.popleft()
                 
             if len(dq) >= self.rpm:
-                raise HTTPException(
+                from starlette.responses import JSONResponse
+                return JSONResponse(
                     status_code=429,
-                    detail=f"Rate limit exceeded: {self.rpm} RPM",
+                    content={"detail": f"Rate limit exceeded: {self.rpm} RPM"},
                     headers={"Retry-After": "60"},
                 )
             dq.append(now)

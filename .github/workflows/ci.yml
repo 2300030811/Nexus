@@ -1,0 +1,68 @@
+name: Nexus Platform CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: nexus_test
+          POSTGRES_USER: nexus_test
+          POSTGRES_PASSWORD: nexus_test_pass
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        # Install service dependencies for type checking
+        pip install -r common/requirements.txt
+        pip install -r api_service/requirements.txt
+        pip install -r ml_models/requirements.txt
+        pip install -r ai_copilot/requirements.txt
+        pip install -r kafka_producer/requirements.txt
+
+    - name: Lint with Ruff
+      run: ruff check .
+
+    - name: Type check with Mypy
+      run: |
+        mypy common/ kafka_producer/ ml_models/ ai_copilot/ api_service/ --ignore-missing-imports
+
+    - name: Run unit tests
+      env:
+        PG_HOST: localhost
+        PG_PORT: 5433
+        PG_DB: nexus_test
+        PG_USER: nexus_test
+        PG_PASSWORD: nexus_test_pass
+      run: |
+        pytest tests/ -v --ignore=tests/integration --junitxml=results.xml
+
+    - name: Validate Docker Compose
+      run: |
+        docker compose -f infrastructure/docker-compose.yml config -q

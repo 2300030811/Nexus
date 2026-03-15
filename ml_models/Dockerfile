@@ -23,7 +23,7 @@ RUN mkdir -p /app/data /app/model && \
     chown -R appuser:appuser /app
 USER appuser
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD test -f /app/model/model.json && echo 'healthy' || echo 'initializing'
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD python -c "from common.db_utils import get_single_connection; conn=get_single_connection(); conn.close()" || exit 1
 
 CMD ["./entrypoint.sh"]

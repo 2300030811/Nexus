@@ -2,13 +2,19 @@
 Pytest configuration and fixtures for Nexus tests.
 """
 
-import pytest
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# Add parent directory to path to import modules
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
+
+# Add parent directory and service directories to path to import modules
+root_path = Path(__file__).parent.parent
+sys.path.insert(0, str(root_path))
+sys.path.insert(0, str(root_path / "api_service"))
+sys.path.insert(0, str(root_path / "ml_models"))
+sys.path.insert(0, str(root_path / "ai_copilot"))
+sys.path.insert(0, str(root_path / "kafka_producer"))
 
 # Mock C-extension and driver dependencies for local test environments
 sys.modules["psycopg2"] = MagicMock()
@@ -53,8 +59,9 @@ def sample_order_event():
 @pytest.fixture
 def sample_revenue_metrics():
     """Fixture providing sample revenue metrics data."""
-    import pandas as pd
     from datetime import datetime
+
+    import pandas as pd
 
     return pd.DataFrame(
         [

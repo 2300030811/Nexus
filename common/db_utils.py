@@ -3,6 +3,7 @@ Database connection utilities with pooling support.
 """
 
 import os
+import time
 from typing import Optional
 import psycopg2
 from psycopg2 import pool
@@ -25,17 +26,28 @@ _connection_pool: Optional[pool.ThreadedConnectionPool] = None
 
 def get_connection_pool(minconn: int = 1, maxconn: int = 10) -> pool.ThreadedConnectionPool:
     """
-    Get or create a threaded connection pool.
-    Use this for services that need concurrent database access (e.g., dashboard, API servers).
+    Get or create a threaded connection pool with retry logic.
     """
     global _connection_pool
     if _connection_pool is None:
         config = get_db_config()
-        _connection_pool = pool.ThreadedConnectionPool(
-            minconn=minconn,
-            maxconn=maxconn,
-            **config
-        )
+        attempts = 3
+        last_err = None
+        
+        for i in range(attempts):
+            try:
+                _connection_pool = pool.ThreadedConnectionPool(
+                    minconn=minconn,
+                    maxconn=maxconn,
+                    **config
+                )
+                return _connection_pool
+            except Exception as e:
+                last_err = e
+                if i < attempts - 1:
+                    time.sleep(2)  # Wait before retry
+                    
+        raise RuntimeError(f"Failed to create DB pool after {attempts} attempts: {last_err}")
     return _connection_pool
 
 

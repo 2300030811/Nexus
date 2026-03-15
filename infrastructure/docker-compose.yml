@@ -352,6 +352,9 @@ services:
     logging: *default-logging
     deploy:
       resources:
+        reservations:
+          cpus: "0.1"
+          memory: 128M
         limits:
           cpus: "1"
           memory: 512M

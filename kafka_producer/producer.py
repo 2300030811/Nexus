@@ -52,13 +52,6 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-_db_config = get_db_config()
-PG_HOST = _db_config['host']
-PG_PORT = _db_config['port']
-PG_DB = _db_config['dbname']
-PG_USER = _db_config['user']
-PG_PASSWORD = _db_config['password']
-
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
 EVENTS_PER_SECOND = float(os.getenv("EVENTS_PER_SECOND", "2.0"))
@@ -84,8 +77,6 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
             time.sleep(delay)
     raise RuntimeError(f"Could not connect to Kafka broker at {broker}")
 
-
-from common.db_utils import get_single_connection, close_connection
 
 class SimulationState:
     def __init__(self):

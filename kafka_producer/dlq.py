@@ -189,6 +189,13 @@ class DeadLetterQueue:
                 break
         if batch:
             self._flush_batch(batch)
+            
+        # Ensure connection pool is cleaned up
+        if hasattr(self, '_pool'):
+            from common.db_utils import close_connection_pool
+            close_connection_pool()
+        
+        self._executor.shutdown(wait=True)
 
     def _flush_batch(self, batch):
         """Helper to flush a batch to the DB outside the main loop."""

@@ -7,7 +7,7 @@ Writes drift scores to a new DB table for dashboard visibility.
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,22 +20,9 @@ from common.constants import (
     REGION_WEIGHTS, get_hour_factor, get_dow_factor,
 )
 from common.logging_utils import get_logger
+from common.db_utils import get_single_connection, close_connection, get_db_config
 
 logger = get_logger("nexus.drift_monitor")
-
-PG_HOST     = os.getenv("PG_HOST", "postgres")
-PG_PORT     = os.getenv("PG_PORT", "5432")
-PG_DB       = os.getenv("PG_DB", "nexus")
-PG_USER     = os.getenv("PG_USER", "nexus")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "nexus_password")
-
-
-from common.db_utils import get_single_connection, close_connection
-
-def get_conn():
-    return get_single_connection()
-
-
 
 
 def population_stability_index(expected: np.ndarray, actual: np.ndarray,
@@ -203,10 +190,12 @@ def log_drift(conn, window_hours: int, metrics: dict):
 
 
 def run_once():
-    conn = get_conn()
-    metrics = compute_drift(conn, window_hours=24)
-    log_drift(conn, 24, metrics)
-    conn.close()
+    conn = get_single_connection()
+    try:
+        metrics = compute_drift(conn, window_hours=24)
+        log_drift(conn, 24, metrics)
+    finally:
+        close_connection(conn)
     return metrics
 
 

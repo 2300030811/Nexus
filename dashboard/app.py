@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 import plotly.express as px
 import plotly.graph_objects as go
 
-from common.db_utils import get_db_config
+from common.db_utils import get_db_config, get_connection_pool
 
 st.set_page_config(page_title="Nexus Ops Dashboard", layout="wide", initial_sidebar_state="expanded")
 
@@ -38,15 +38,10 @@ def check_password():
 # ---------------------------------------------------------------------------
 # Configuration (via shared db_utils)
 # ---------------------------------------------------------------------------
-_db_cfg = get_db_config()
-
 
 @st.cache_resource
 def get_pool():
-    return psycopg2.pool.ThreadedConnectionPool(
-        minconn=1, maxconn=10,
-        **_db_cfg,
-    )
+    return get_connection_pool(minconn=1, maxconn=10)
 
 def run_query(query: str, params: tuple = ()) -> pd.DataFrame:
     """Execute a SELECT query and return results as DataFrame."""
@@ -55,11 +50,15 @@ def run_query(query: str, params: tuple = ()) -> pd.DataFrame:
         conn = pool.getconn()
         try:
             return pd.read_sql(query, conn, params=params)
+        except Exception as e:
+            conn.rollback()
+            raise e
         finally:
             pool.putconn(conn)
     except Exception as e:
         st.error(f"Database query error: {str(e)}")
-        return pd.DataFrame()  # Return empty DataFrame on error
+        # If pool is broken, this might help on next run
+        return pd.DataFrame()
 
 def run_update(query: str, params: tuple = ()):
     """Execute an INSERT/UPDATE/DELETE query."""
@@ -82,19 +81,20 @@ def run_update(query: str, params: tuple = ()):
 def load_kpis(minutes: int) -> dict:
     """Load KPIs using pre-aggregated metrics for performance."""
     try:
-        # OPTIMIZATION: Use revenue_metrics instead of scanning order_events
-        row = run_query("""
-            SELECT SUM(order_count) as total_orders, SUM(total_revenue) as total_revenue
-            FROM revenue_metrics WHERE window_end >= NOW() - (%s * INTERVAL '1 minute')
-        """, (minutes,))
+        query = """
+            SELECT 
+                (SELECT SUM(order_count) FROM revenue_metrics WHERE window_end >= NOW() - (%s * INTERVAL '1 minute')) as total_orders,
+                (SELECT SUM(total_revenue) FROM revenue_metrics WHERE window_end >= NOW() - (%s * INTERVAL '1 minute')) as total_revenue,
+                (SELECT COUNT(*) FROM anomalies WHERE status = 'open') as open_anomalies,
+                (SELECT COUNT(*) FROM copilot_reports) as total_reports
+        """
+        row = run_query(query, (minutes, minutes))
         
-        anom = run_query("SELECT COUNT(*) as count FROM anomalies WHERE status = 'open'")
-        reports = run_query("SELECT COUNT(*) as count FROM copilot_reports")
-        
-        orders = int(row["total_orders"].iloc[0]) if not row.empty and not pd.isna(row["total_orders"].iloc[0]) else 0
-        revenue = float(row["total_revenue"].iloc[0]) if not row.empty and not pd.isna(row["total_revenue"].iloc[0]) else 0.0
-        open_anom = int(anom["count"].iloc[0]) if not anom.empty else 0
-        total_reps = int(reports["count"].iloc[0]) if not reports.empty else 0
+        row_data = row.iloc[0]
+        orders = int(row_data["total_orders"]) if not pd.isna(row_data["total_orders"]) else 0
+        revenue = float(row_data["total_revenue"]) if not pd.isna(row_data["total_revenue"]) else 0.0
+        open_anom = int(row_data["open_anomalies"]) if not pd.isna(row_data["open_anomalies"]) else 0
+        total_reps = int(row_data["total_reports"]) if not pd.isna(row_data["total_reports"]) else 0
         
         return {
             "orders": orders,

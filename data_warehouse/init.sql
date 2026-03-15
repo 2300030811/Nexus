@@ -147,8 +147,20 @@ ON CONFLICT (key) DO NOTHING;
 --  3. Retention-based TTL index
 --  4. Connection pooling with PgBouncer or pgpool2
 
--- Anomaly archive table (optional, for compliance/auditing)
-CREATE TABLE IF NOT EXISTS anomalies_archive (LIKE anomalies INCLUDING ALL);
+-- Anomaly archive table (copies data but removes auto-incrementing ID for archiving)
+CREATE TABLE IF NOT EXISTS anomalies_archive (
+    id               INTEGER,
+    detected_at      TIMESTAMPTZ,
+    window_start     TIMESTAMPTZ,
+    window_end       TIMESTAMPTZ,
+    category         VARCHAR(64),
+    region           VARCHAR(32),
+    actual_revenue   NUMERIC(12, 2),
+    expected_revenue NUMERIC(12, 2),
+    anomaly_score    NUMERIC(6, 4),
+    severity         VARCHAR(16),
+    status           VARCHAR(16)
+);
 -- Periodically: INSERT INTO anomalies_archive SELECT * FROM anomalies WHERE detected_at < NOW() - INTERVAL '90 days';
 --               DELETE FROM anomalies WHERE detected_at < NOW() - INTERVAL '90 days';
 

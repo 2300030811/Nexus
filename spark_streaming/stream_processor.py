@@ -1,17 +1,18 @@
 import os
-import time
-import logging
-from datetime import datetime, timezone, timedelta
 
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql import functions as F
+from batch_health import BatchHealth
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F  # noqa: N812
 from pyspark.sql.types import (
-    StructType, StructField, StringType, IntegerType, DoubleType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
 )
 
 from common.logging_utils import get_logger
 from common.metrics import start_metrics_server
-from batch_health import BatchHealth
 
 # ---------------------------------------------------------------------------
 # Structured logging (via shared utility)
@@ -24,7 +25,7 @@ logger = get_logger("nexus.spark")
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
 
-from common.db_utils import get_db_config
+from common.db_utils import get_db_config  # noqa: E402
 
 _db_cfg = get_db_config()
 PG_HOST = _db_cfg['host']
@@ -113,9 +114,8 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
     Optimized: Runs in parallel across Spark executors instead of collecting to driver.
     """
     import psycopg2
-    from psycopg2.extras import execute_values
-
     from psycopg2 import sql
+    from psycopg2.extras import execute_values
     columns = batch_df.columns
     col_names = sql.SQL(', ').join(sql.Identifier(col) for col in columns)
     constraint_names = sql.SQL(', ').join(sql.Identifier(col) for col in constraint_cols)
@@ -129,7 +129,7 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
         conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD)
         try:
             upsert_query = sql.SQL("""
-                INSERT INTO {table} ({fields}) VALUES %s 
+                INSERT INTO {table} ({fields}) VALUES %s
                 ON CONFLICT ({pk}) DO UPDATE SET {updates}
             """).format(
                 table=sql.Identifier(table_name),
@@ -137,7 +137,7 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
                 pk=constraint_names,
                 updates=update_actions
             )
-            
+
             # Batch values into groups of 1000 for efficiency
             partition_data = [tuple(row) for row in rows]
             if not partition_data:
@@ -148,7 +148,6 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
             conn.commit()
         finally:
             conn.close()
-        yield True # Return a dummy value to satisfy mapPartitions
 
     # Scale optimization: Reduce partitions before writing to DB to avoid connection overhead
     # For this workload size, 1 partition is optimal. For TB-scale, increase this.
@@ -247,16 +246,19 @@ def main() -> None:
     )
 
     def write_features_direct(batch_df: DataFrame, batch_id: int) -> None:
-        if batch_df.isEmpty(): return
+        if batch_df.isEmpty():
+            return
         try:
+            # IMPORTANT: For production, these should be calculated using actual 15m/60m sliding windows.
+            # Using 5m data as proxy for demonstration.
             feats = batch_df.select(
                 "computed_at", "category", "region",
-                F.col("revenue_last_5m"), 
-                F.col("revenue_last_5m").alias("revenue_last_15m"), 
-                F.col("revenue_last_5m").alias("revenue_last_60m"),
-                F.col("orders_last_5m"), 
-                F.col("orders_last_5m").alias("orders_last_15m"), 
-                F.col("orders_last_5m").alias("orders_last_60m"),
+                F.col("revenue_last_5m"),
+                (F.col("revenue_last_5m") * 3).alias("revenue_last_15m"), # Approximated
+                (F.col("revenue_last_5m") * 12).alias("revenue_last_60m"), # Approximated
+                F.col("orders_last_5m"),
+                (F.col("orders_last_5m") * 3).alias("orders_last_15m"), # Approximated
+                (F.col("orders_last_5m") * 12).alias("orders_last_60m"), # Approximated
                 F.col("avg_order_value_last_5m").alias("avg_order_value_last_15m"),
                 F.lit(0.0).alias("revenue_trend_pct")
             )
@@ -265,7 +267,7 @@ def main() -> None:
                 ["computed_at", "category", "region"],
                 ["revenue_last_5m", "orders_last_5m", "avg_order_value_last_15m"]
             )
-            
+
             # After writing new features, purge rows older than 2 hours
             # Moved to a more efficient batching approach to minimize DB hits
             import psycopg2
@@ -277,7 +279,7 @@ def main() -> None:
                             "DELETE FROM feature_store WHERE computed_at < NOW() - INTERVAL '2 hours'"
                         )
                 conn.commit()
-                
+
             _features_health.record_success()
         except Exception as e:
             _features_health.record_failure(e)
@@ -286,12 +288,18 @@ def main() -> None:
                 raise
 
     # Queries
-    raw_query = events.writeStream.foreachBatch(write_raw_events_batch).option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_events").start()
-    agg_query = agg_df.writeStream.foreachBatch(write_metrics_batch).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/revenue_metrics").start()
-    feature_query = feature_agg.writeStream.foreachBatch(write_features_direct).option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_direct").trigger(processingTime="60 seconds").start()
+    events.writeStream.foreachBatch(write_raw_events_batch).option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_events").start()
+    agg_df.writeStream.foreachBatch(write_metrics_batch).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/revenue_metrics").start()
+    feature_agg.writeStream.foreachBatch(write_features_direct).option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_direct").trigger(processingTime="60 seconds").start()
 
     logger.info("Spark streaming started")
-    spark.streams.awaitAnyTermination()
+    try:
+        spark.streams.awaitAnyTermination()
+    except KeyboardInterrupt:
+        logger.info("Shutdown signaled, stopping Spark queries...")
+    except Exception as e:
+        logger.error("Spark streaming failure: %s", str(e))
+        raise
 
 if __name__ == "__main__":
     main()

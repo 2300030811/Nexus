@@ -3,7 +3,7 @@ FROM bitnami/spark:3.5.0
 USER root
 
 # Install Python dependencies
-RUN pip install --no-cache-dir pyspark==3.5.0 psycopg2-binary==2.9.9
+RUN pip install --no-cache-dir pyspark==3.5.0 psycopg2-binary==2.9.9 prometheus-client==0.21.0
 
 COPY common/ /app/common/
 COPY scripts/ /app/scripts/

@@ -23,6 +23,7 @@ from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
     FEATURE_COLUMNS, get_hour_factor, get_dow_factor, classify_severity
 )
+from common.db_utils import get_single_connection, close_connection, get_db_config
 from common.logging_utils import get_logger
 from common.metrics import (
     SCANS_TOTAL, ANOMALIES_DETECTED, SCORING_LATENCY,
@@ -52,12 +53,6 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-_db_cfg = get_db_config()
-PG_HOST = _db_cfg['host']
-PG_PORT = _db_cfg['port']
-PG_DB = _db_cfg['dbname']
-PG_USER = _db_cfg['user']
-PG_PASSWORD = _db_cfg['password']
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))  # seconds
 MODEL_PATH = os.getenv("MODEL_PATH", "/app/model/model.json")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
@@ -65,10 +60,6 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 # ---------------------------------------------------------------------------
 # Database Functions
 # ---------------------------------------------------------------------------
-
-
-from common.db_utils import get_single_connection, close_connection
-
 
 
 # Removed ensure_anomalies_table - handled by init.sql
