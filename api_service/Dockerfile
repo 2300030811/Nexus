@@ -13,6 +13,7 @@ COPY common/ /app/common/
 COPY scripts/ /app/scripts/
 COPY api_service/main.py /app/main.py
 COPY api_service/rate_limit.py /app/rate_limit.py
+COPY api_service/auth.py /app/auth.py
 
 RUN python /app/scripts/validate_secrets.py || exit 1
 

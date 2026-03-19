@@ -30,7 +30,7 @@ from common.constants import (
     get_hour_factor, get_dow_factor, FEATURE_COLUMNS
 )
 from common.db_utils import get_single_connection, close_connection
-from common.model_utils import save_versioned_model
+from common.model_utils import save_versioned_model, load_metadata
 
 from common.logging_utils import get_logger
 
@@ -48,12 +48,19 @@ MODEL_PATH = MODEL_DIR / "model.json"
 def extract_training_data(days: int = 30) -> pd.DataFrame:
     """
     Extract training data from production database.
-    
+
     Combines revenue_metrics with confirmed anomalies to create labeled training data.
+
+    WARNING – feedback loop risk: labels here are derived from the model's own prior
+    predictions stored in the anomalies table.  To break the loop over time, operators
+    should mark false positives with status='false_positive' via the dashboard or API.
+    Those rows are excluded below so they cannot reinforce incorrect model behaviour.
+    Ideally, a human-review workflow sets a 'confirmed' status before retraining.
     """
     conn = get_single_connection()
-    
-    # Query to join revenue_metrics with anomalies (labeled data)
+
+    # Only treat anomalies that have NOT been marked as false positives as positive labels.
+    # This prevents confirmed mistakes from entrenching themselves in successive model versions.
     query = """
         WITH labeled_windows AS (
             SELECT 
@@ -70,6 +77,7 @@ def extract_training_data(days: int = 30) -> pd.DataFrame:
                 ON rm.window_start = a.window_start 
                 AND rm.category = a.category 
                 AND rm.region = a.region
+                AND a.status != 'false_positive'
             WHERE rm.window_start >= NOW() - (%s * INTERVAL '1 day')
         )
         SELECT * FROM labeled_windows
@@ -143,7 +151,7 @@ def train_model(df: pd.DataFrame, test_size: float = 0.2) -> xgb.XGBClassifier:
     )
     
     # Calculate class weight
-    scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+    scale_pos_weight = float(np.sum(y_train == 0)) / float(np.sum(y_train == 1))
     
     # Train model
     model = xgb.XGBClassifier(
@@ -174,21 +182,44 @@ def train_model(df: pd.DataFrame, test_size: float = 0.2) -> xgb.XGBClassifier:
     }).sort_values("importance", ascending=False)
     logger.info("Top 5 important features:\n%s", importance.head().to_string(index=False))
     
-    return model
+    return model, {"precision": precision, "recall": recall, "f1": f1}
 
 
-def save_model_with_metadata(model, df):
+def save_model_with_gate(model, metrics, df):
+    """Save model but only promote to production if it meets performance criteria."""
+    current_meta = load_metadata(MODEL_DIR)
+    current_f1 = (current_meta or {}).get("metrics", {}).get("f1", 0.0)
+    
+    new_f1 = metrics["f1"]
+    
+    metadata = {
+        "num_samples":   len(df),
+        "num_anomalies": int(df["is_anomaly"].sum()),
+        "anomaly_rate":  float(df["is_anomaly"].mean()),
+        "metrics":       metrics,
+        "features":      FEATURE_COLUMNS,
+        "category_map":  CATEGORY_MAP,
+        "region_map":    REGION_MAP,
+    }
+
+    if new_f1 < current_f1:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logger.warning(
+            "New model F1=%.4f is WORSE than current production F1=%.4f. "
+            "Skipping production promotion. Saved as candidate only.",
+            new_f1, current_f1
+        )
+        # Just save timestamped model/meta without overwriting 'model.json'
+        model.save_model(str(MODEL_DIR / f"candidate_{timestamp}.json"))
+        with open(MODEL_DIR / f"candidate_meta_{timestamp}.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+        return
+
+    logger.info("New model F1=%.4f >= current F1=%.4f. Promoting to production.", new_f1, current_f1)
     save_versioned_model(
         model,
         model_dir=MODEL_DIR,
-        metadata={
-            "num_samples":   len(df),
-            "num_anomalies": int(df["is_anomaly"].sum()),
-            "anomaly_rate":  float(df["is_anomaly"].mean()),
-            "features":      FEATURE_COLUMNS,
-            "category_map":  CATEGORY_MAP,
-            "region_map":    REGION_MAP,
-        },
+        metadata=metadata,
         source_df=df,
     )
 
@@ -215,10 +246,10 @@ def main():
     df = engineer_features(df)
     
     # Train model
-    model = train_model(df, test_size=args.test_size)
+    model, metrics = train_model(df, test_size=args.test_size)
     
-    # Save model
-    save_model_with_metadata(model, df)
+    # Save model with gate
+    save_model_with_gate(model, metrics, df)
     
     logger.info("Model retraining completed successfully")
 

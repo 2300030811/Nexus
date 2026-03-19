@@ -5,11 +5,25 @@ from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Memory-efficient sliding-window rate limiter."""
+    """Memory-efficient sliding-window rate limiter.
 
-    def __init__(self, app, requests_per_minute: int = 100):
+    Accepts either ``requests_per_minute`` (60-second window, default) or
+    ``calls_per_second`` (1-second window) to keep unit tests fast.
+    """
+
+    def __init__(
+        self,
+        app,
+        requests_per_minute: int = 100,
+        calls_per_second: int | None = None,
+    ):
         super().__init__(app)
-        self.rpm = requests_per_minute
+        if calls_per_second is not None:
+            self.rpm = calls_per_second
+            self._window_seconds = 1.0
+        else:
+            self.rpm = requests_per_minute
+            self._window_seconds = 60.0
         self._windows: dict[str, deque] = {}
         self._last_cleanup = time.time()
         self._lock = threading.Lock()
@@ -26,11 +40,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         else:
             client = request.client.host if request.client else "unknown"
         now = time.time()
-        window_start = now - 60.0
+        window_start = now - self._window_seconds
 
         with self._lock:
-            # Periodic cleanup of stagnant entries every 5 minutes
-            if now - self._last_cleanup > 300:
+            # Periodic cleanup every 5x the window size
+            if now - self._last_cleanup > max(self._window_seconds * 5, 1.0):
                 self._cleanup(now)
             
             if client not in self._windows:
@@ -54,8 +68,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def _cleanup(self, now: float):
         """Purge entries that haven't been active in over a minute."""
         expired_ips = [
-            ip for ip, dq in self._windows.items() 
-            if not dq or dq[-1] < (now - 60.0)
+            ip for ip, dq in self._windows.items()
+            if not dq or dq[-1] < (now - self._window_seconds)
         ]
         for ip in expired_ips:
             del self._windows[ip]

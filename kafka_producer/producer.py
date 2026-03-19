@@ -12,6 +12,7 @@ import random
 import signal
 import sys
 import time
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -37,13 +38,12 @@ logger = get_logger("nexus.producer")
 # ---------------------------------------------------------------------------
 # Global state for graceful shutdown
 # ---------------------------------------------------------------------------
-shutdown_flag = False
+_shutdown = threading.Event()
 
 def signal_handler(sig, frame):
     """Handle SIGTERM/SIGINT for graceful shutdown."""
-    global shutdown_flag
     logger.info("Received signal %s, initiating graceful shutdown", sig)
-    shutdown_flag = True
+    _shutdown.set()
 
 # Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
@@ -52,7 +52,7 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092,localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
 EVENTS_PER_SECOND = float(os.getenv("EVENTS_PER_SECOND", "2.0"))
 
@@ -64,11 +64,12 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
             producer = KafkaProducer(
                 bootstrap_servers=broker,
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                acks=1, # Wait for leader to acknowledge
+                acks="all",                              # Leader + all in-sync replicas
                 retries=5,
-                batch_size=32768, # 32KB batches
-                linger_ms=20, # Higher linger for better batching efficiency
-                compression_type="lz4", # Efficient compression for JSON telemetry
+                max_in_flight_requests_per_connection=1,  # Preserve ordering during retries
+                batch_size=32768,                         # 32KB batches
+                linger_ms=20,                             # Higher linger for better batching
+                compression_type="lz4",                   # Efficient compression for JSON
             )
             logger.info("Connected to Kafka broker at %s", broker)
             return producer
@@ -84,7 +85,12 @@ class SimulationState:
 
     def get_conn(self):
         """Return a persistent connection, reconnecting if necessary."""
-        if self._conn is None or self._conn.closed:
+        if self._conn is None:
+            try:
+                self._conn = get_single_connection()
+            except Exception:
+                self._conn = None
+        elif getattr(self._conn, "closed", 0) != 0:
             try:
                 self._conn = get_single_connection()
             except Exception:
@@ -136,10 +142,11 @@ def generate_order_event(simulate_stockout: bool = False) -> dict:
     unit_price = round(product["base_price"] * random.uniform(0.95, 1.05), 2)
 
     return {
+        "schema_version": 1,
         "event_id": str(uuid.uuid4()),
         "event_type": "order_placed",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "order_id": f"ORD-{uuid.uuid4().hex[:8].upper()}",
+        "order_id": f"ORD-{str(uuid.uuid4().hex)[0:8].upper()}",
         "product_id": product["product_id"],
         "product_name": product["name"],
         "category": product["category"],
@@ -176,7 +183,7 @@ def main() -> None:
     simulate_stockout = False
     
     try:
-        while not shutdown_flag:
+        while not _shutdown.is_set():
             # Refresh simulation mode every 20 events (~10 seconds)
             if event_count % 20 == 0:
                 simulate_stockout = _sim_state.check_mode()

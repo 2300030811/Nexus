@@ -12,16 +12,23 @@ from datetime import datetime, timezone
 
 import re
 
-# Regex to find potential secrets in log strings
-SECRETS_REGEX = re.compile(r"(password|secret|key|token|auth)['\"]?\s*[:=]\s*['\"]?([^'\"\s,]+)['\"]?", re.IGNORECASE)
+# Regex to find potential secrets in log strings (includes support for connection strings)
+SECRETS_REGEX = re.compile(
+    r"(password|secret|key|token|auth)['\"]?\s*[:=]\s*['\"]?([^'\"\s,]+)['\"]?|"
+    r"(?P<dsn_pass>:[^:/@]+@)", 
+    re.IGNORECASE
+)
 
 class JSONFormatter(logging.Formatter):
     """Format log records as JSON with automated secret masking."""
 
     def format(self, record: logging.LogRecord) -> str:
         msg = record.getMessage()
-        # Mask common secret patterns
-        masked_msg = SECRETS_REGEX.sub(r"\1: [REDACTED]", msg)
+        # Mask common secret patterns and DSN passwords
+        masked_msg = SECRETS_REGEX.sub(
+            lambda m: m.group(1) + ": [REDACTED]" if m.group(1) else ":[REDACTED]@", 
+            msg
+        )
 
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -29,7 +36,7 @@ class JSONFormatter(logging.Formatter):
             "service": record.name,
             "message": masked_msg,
         }
-        if record.exc_info and record.exc_info[0]:
+        if isinstance(record.exc_info, tuple):
             log_entry["exception"] = self.formatException(record.exc_info)
         # Include extra fields if provided
         for key in ("event_count", "scan_count", "anomaly_id", "batch_id", "extra"):

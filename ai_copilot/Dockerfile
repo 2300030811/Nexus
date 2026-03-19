@@ -18,6 +18,6 @@ RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD python -c "import psycopg2; print('healthy')" || exit 1
+  CMD python -c "from common.db_utils import get_single_connection; conn=get_single_connection(); conn.close()" || exit 1
 
 CMD ["python", "-u", "copilot.py"]

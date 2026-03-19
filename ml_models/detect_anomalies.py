@@ -11,6 +11,7 @@ import signal
 import sys
 import time
 import requests
+import threading
 from datetime import datetime, timezone
 
 import numpy as np
@@ -35,16 +36,14 @@ from common.metrics import (
 # ---------------------------------------------------------------------------
 logger = get_logger("nexus.anomaly_detector")
 
-# ---------------------------------------------------------------------------
 # Global state for graceful shutdown
 # ---------------------------------------------------------------------------
-shutdown_flag = False
+_shutdown = threading.Event()
 
 def signal_handler(sig, frame):
     """Handle SIGTERM/SIGINT for graceful shutdown."""
-    global shutdown_flag
     logger.info("Received signal %s, initiating graceful shutdown", sig)
-    shutdown_flag = True
+    _shutdown.set()
 
 # Register signal handlers
 signal.signal(signal.SIGTERM, signal_handler)
@@ -219,7 +218,7 @@ def main() -> None:
     reconnect_backoff = 1  # seconds, will grow exponentially
     max_backoff = 60  # cap at 60s
     
-    while not shutdown_flag:
+    while not _shutdown.is_set():
         try:
             # Hot model reloading
             try:
@@ -279,7 +278,8 @@ def main() -> None:
         except Exception as e:
             logger.error("Unexpected error: %s", e)
 
-        time.sleep(SCAN_INTERVAL)
+        if _shutdown.wait(timeout=SCAN_INTERVAL):
+            break
     
     # Cleanup on shutdown
     logger.info("Closing database connection")

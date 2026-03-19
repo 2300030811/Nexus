@@ -1,3 +1,4 @@
+import functools
 import time
 import threading
 from collections import OrderedDict
@@ -37,6 +38,7 @@ class TTLCache:
     def cached(self, key_fn: Callable, ttl: int | None = None):
         """Decorator factory: cache the result keyed by key_fn(*args, **kwargs)."""
         def decorator(fn: Callable):
+            @functools.wraps(fn)
             def wrapper(*args, **kwargs):
                 key = key_fn(*args, **kwargs)
                 hit = self.get(key)

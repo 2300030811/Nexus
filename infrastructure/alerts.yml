@@ -1,0 +1,38 @@
+groups:
+  - name: nexus_alerts
+    rules:
+      - alert: KafkaBrokerDown
+        expr: nexus_produce_errors_total > 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka producer failing for Nexus"
+          description: "Producer has seen > 5 errors in the last minute. Kafka may be down."
+
+      - alert: HighAnomalyRate
+        expr: sum(rate(nexus_anomalies_detected_total[5m])) / clamp_min(sum(rate(nexus_events_produced_total[5m])), 1) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High anomaly rate detected"
+          description: "Over 20% of events are being flagged as anomalies. Potential system attack or model drift."
+
+      - alert: DatabaseConnectionFailure
+        expr: nexus_db_reconnects_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection issues"
+          description: "Service {{ $labels.service }} is failing to connect to Postgres."
+
+      - alert: CopilotInvestigationErrors
+        expr: increase(nexus_investigation_errors_total[15m]) > 3
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Copilot investigation error spike"
+          description: "AI copilot has failed more than 3 investigations in the last 15 minutes."

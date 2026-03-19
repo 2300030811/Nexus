@@ -1,6 +1,6 @@
 import pytest
-import pandas as pd
-import numpy as np
+pd = pytest.importorskip("pandas")
+np = pytest.importorskip("numpy")
 from unittest.mock import MagicMock
 
 from ml_models.detect_anomalies import score_metrics

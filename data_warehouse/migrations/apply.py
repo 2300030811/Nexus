@@ -1,8 +1,17 @@
 """Minimal migration runner — applies new SQL files in version order."""
 import os
+import sys
 import glob
 import psycopg2
 from pathlib import Path
+
+# Allow running directly from the data_warehouse/migrations/ directory
+for _rel in ("..", "../.."):
+    _p = os.path.normpath(os.path.join(os.path.dirname(__file__), _rel))
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from common.db_utils import get_db_config  # noqa: E402
 
 MIGRATIONS_DIR = Path(__file__).parent
 
@@ -54,11 +63,6 @@ def run_migrations(conn):
     print("All migrations up to date.")
 
 if __name__ == "__main__":
-    conn = psycopg2.connect(
-        host=os.getenv("PG_HOST", "postgres"),
-        dbname=os.getenv("PG_DB", "nexus"),
-        user=os.getenv("PG_USER", "nexus"),
-        password=os.getenv("PG_PASSWORD", "nexus_password"),
-    )
+    conn = psycopg2.connect(**get_db_config())
     run_migrations(conn)
     conn.close()

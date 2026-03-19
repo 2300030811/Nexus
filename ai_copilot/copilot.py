@@ -29,7 +29,7 @@ from tools import (
     query_recent_order_trend, query_payment_method_breakdown,
 )
 from common.logging_utils import get_logger
-from common.db_utils import get_connection_pool
+from common.db_utils import get_connection_pool, get_db_config, close_connection_pool
 from common.metrics import (
     INVESTIGATIONS_TOTAL, INVESTIGATION_ERRORS, LLM_RESPONSE_TIME,
     REPORTS_SAVED, DB_RECONNECTS, start_metrics_server,
@@ -60,13 +60,6 @@ signal.signal(signal.SIGINT, signal_handler)
 # ---------------------------------------------------------------------------
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
-
-_db_cfg = get_db_config()
-PG_HOST = _db_cfg['host']
-PG_PORT = _db_cfg['port']
-PG_DB = _db_cfg['dbname']
-PG_USER = _db_cfg['user']
-PG_PASSWORD = _db_cfg['password']
 
 SCAN_INTERVAL = int(os.getenv("COPILOT_INTERVAL", "90"))  # seconds
 
@@ -180,7 +173,15 @@ def parse_report(report_text: str, anomaly: dict | None = None) -> dict:
         # Grab any substantial paragraph from the LLM response as the analysis
         paragraphs = [p.strip() for p in report_text.split("\n\n") if len(p.strip()) > 40]
         if paragraphs:
-            root_cause = paragraphs[-1][:500]  # last substantial paragraph
+            para = str(paragraphs[-1])
+            root_cause = para[0:500]  # last substantial paragraph
+
+    # --- Heuristic confidence fallback when model omits explicit confidence ---
+    if not confidence_found:
+        if len(root_cause.strip()) >= 50:
+            confidence = 0.55
+        else:
+            confidence = 0.15
 
     # --- Fallback from anomaly data ---
     if anomaly and not loss_found:
@@ -190,21 +191,29 @@ def parse_report(report_text: str, anomaly: dict | None = None) -> dict:
         loss_found = True
         logger.info("Estimated loss computed from anomaly data: %.2f", estimated_loss)
 
-    if not confidence_found:
-        # Heuristic: if the agent produced a non-trivial analysis, give baseline confidence
-        if root_cause and len(root_cause) > 50:
-            confidence = 0.55
-        elif root_cause:
-            confidence = 0.35
-        else:
-            confidence = 0.15
-        logger.info("Confidence inferred heuristically: %.2f", confidence)
+    # --- Phase 3: Sanity Validation (Grounded Reasoning) ---
+    if anomaly:
+        actual = float(anomaly.get("actual_revenue", 0))
+        expected = float(anomaly.get("expected_revenue", 0))
+        max_sane_loss = max(expected, 1000.0) * 1.5  # LLM shouldn't hallucinate 10x loss
+        
+        # 1. Ground loss estimate
+        if estimated_loss > max_sane_loss:
+            logger.warning("LLM hallucinated extreme loss: %.2f. Reverting to pre-calculated: %.2f", 
+                           estimated_loss, max(expected - actual, 0.0))
+            estimated_loss = max(expected - actual, 0.0)
+            
+        # 2. Ground confidence
+        # If the LLM produces a tiny report but claims 99% confidence, it's overconfident
+        if confidence > 0.9 and (not root_cause or len(root_cause) < 100):
+            logger.warning("LLM overconfident (%.2f) on thin analysis. Capping at 0.7", confidence)
+            confidence = 0.7
 
     return {
         "root_cause": root_cause.strip() or "Unable to determine root cause.",
         "recommended_action": action.strip() or "Manual investigation recommended.",
-        "confidence": confidence,
-        "estimated_loss": estimated_loss,
+        "confidence": round(float(confidence), ndigits=2),
+        "estimated_loss": round(float(estimated_loss), ndigits=2),
     }
 
 
@@ -259,7 +268,7 @@ def gather_investigation_data(anomaly: dict) -> str:
 
     sections = []
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        future_to_name = {executor.submit(func): name for name, func in tasks}
+        future_to_name = {executor.submit(func, *[], **{}): name for name, func in tasks}
         # results are returned as they complete
         for future in as_completed(future_to_name):
             name = future_to_name[future]
@@ -296,7 +305,7 @@ def investigate_anomaly(llm, breaker, anomaly: dict) -> str:
         f"  Region: {anomaly['region']}\n"
         f"  Actual Revenue: {actual:,.2f}\n"
         f"  Expected Revenue: {expected:,.2f}\n"
-        f"  Direction: {direction} {abs(pct):.1f}%\n"
+        f"  Direction: {direction} {abs(float(pct)):.1f}%\n"
         f"  Pre-calculated Loss: {loss:,.2f}\n"
         f"  Anomaly Score: {float(anomaly['anomaly_score']):.3f}\n"
         f"  Detected At: {anomaly['detected_at']}\n\n"
@@ -399,7 +408,7 @@ def main() -> None:
                         pool.putconn(worker_conn)
 
                 with ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = [executor.submit(process_anomaly, anomaly) for anomaly in anomalies]
+                    futures = [executor.submit(process_anomaly, anomaly=anomaly) for anomaly in anomalies]
                     for future in as_completed(futures):
                         try:
                             future.result()
@@ -410,16 +419,18 @@ def main() -> None:
             logger.error("Database pool exhausted: %s", pool_err)
         except psycopg2.OperationalError as db_err:
             DB_RECONNECTS.labels(service="ai-copilot").inc()
-            logger.error("Database error, pool will handle reconnect: %s", db_err)
+            logger.error("Database error, retrying in %ds: %s", reconnect_backoff, db_err)
             time.sleep(reconnect_backoff)
+            reconnect_backoff = min(reconnect_backoff * 2, 60)  # Exponential backoff, cap at 60s
+            continue  # Skip SCAN_INTERVAL sleep on DB error
         except Exception as e:
             logger.error("Unexpected error: %s", e)
 
+        reconnect_backoff = 1  # Reset backoff on success
         time.sleep(SCAN_INTERVAL)
-    
+
     # Cleanup on shutdown
     logger.info("Closing database pool")
-    from common.db_utils import close_connection_pool
     close_connection_pool()
     logger.info("AI Copilot stopped after %d scans", scan_count)
 

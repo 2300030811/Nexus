@@ -4,27 +4,25 @@ Nexus Database Maintenance Script
 Performs VACUUM ANALYZE to update statistics and reclaim space.
 """
 import os
+import sys
 import time
 import psycopg2
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from common.logging_utils import get_logger
+from common.db_utils import get_db_config
 
 logger = get_logger("nexus.db_maintenance")
 
-PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DB   = os.getenv("PG_DB",   "nexus")
-PG_USER = os.getenv("PG_USER", "nexus")
-PG_PASS = os.getenv("PG_PASSWORD", "nexus_password")
 
 def maintain():
-    logger.info("Starting database maintenance on %s...", PG_DB)
-    
+    cfg = get_db_config()
+    logger.info("Starting database maintenance on %s...", cfg["dbname"])
+
     try:
         # Maintenance commands cannot run inside a transaction block
-        conn = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-            user=PG_USER, password=PG_PASS
-        )
+        conn = psycopg2.connect(**cfg)
         conn.autocommit = True
         
         with conn.cursor() as cur:

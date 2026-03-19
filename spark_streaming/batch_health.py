@@ -58,5 +58,5 @@ class BatchHealth:
                 "total_failures": self._total_failures,
                 "total_batches": self._total_batches,
                 "failure_rate": round(rate, 4),
-                "healthy": self.is_healthy,
+                "healthy": self._consecutive_failures < self.failure_threshold,
             }

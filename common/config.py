@@ -25,7 +25,7 @@ def load_config() -> Dict[str, Any]:
         
         # Kafka Configuration
         'kafka': {
-            'broker': os.getenv("KAFKA_BROKER", "kafka:29092"),
+            'broker': os.getenv("KAFKA_BROKER", "kafka:29092,localhost:9092"),
             'topic': os.getenv("KAFKA_TOPIC", "order_events"),
             'events_per_second': float(os.getenv("EVENTS_PER_SECOND", "2.0")),
         },
@@ -58,4 +58,4 @@ def get_db_dsn() -> str:
     """Get PostgreSQL DSN string for connection."""
     config = load_config()
     db = config['database']
-    return f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['dbname']}"
+    return f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['dbname']}?connect_timeout=5"

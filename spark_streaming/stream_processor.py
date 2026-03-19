@@ -1,4 +1,5 @@
 import os
+import time
 
 from batch_health import BatchHealth
 from pyspark.sql import DataFrame, SparkSession
@@ -12,7 +13,7 @@ from pyspark.sql.types import (
 )
 
 from common.logging_utils import get_logger
-from common.metrics import start_metrics_server
+from common.metrics import SPARK_BATCH_DURATION, SPARK_RECORDS_PROCESSED, start_metrics_server
 
 # ---------------------------------------------------------------------------
 # Structured logging (via shared utility)
@@ -22,8 +23,26 @@ logger = get_logger("nexus.spark")
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092")
+KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:29092,localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "order_events")
+ENV = os.getenv("ENV", "development").strip().lower()
+
+
+def _env_default_starting_offsets() -> str:
+    if ENV in {"development", "local", "test"}:
+        return "earliest"
+    return "latest"
+
+
+def _env_default_fail_on_data_loss() -> str:
+    if ENV in {"development", "local", "test"}:
+        return "false"
+    return "true"
+
+
+KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", _env_default_starting_offsets())
+KAFKA_FAIL_ON_DATA_LOSS = os.getenv("KAFKA_FAIL_ON_DATA_LOSS", _env_default_fail_on_data_loss())
+KAFKA_MAX_OFFSETS_PER_TRIGGER = os.getenv("KAFKA_MAX_OFFSETS_PER_TRIGGER", "10000")
 
 from common.db_utils import get_db_config  # noqa: E402
 
@@ -68,15 +87,11 @@ def create_spark_session() -> SparkSession:
                 "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
                 "org.postgresql:postgresql:42.7.1")
         .config("spark.sql.streaming.schemaInference", "false")
-        # --- AQE & Performance ---
-        .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.sql.adaptive.skewJoin.enabled", "true")
-        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+        # AQE is not supported for structured streaming queries.
+        .config("spark.sql.adaptive.enabled", "false")
         .config("spark.default.parallelism", "16")
         .config("spark.sql.shuffle.partitions", "16")
         # --- Streaming Robustness ---
-        .config("spark.sql.streaming.maxOffsetsPerTrigger", "10000")
         .config("spark.sql.streaming.minBatchesToRetain", "50")
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
         .getOrCreate()
@@ -88,8 +103,9 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BROKER)
         .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "earliest")
-        .option("failOnDataLoss", "false")
+        .option("startingOffsets", KAFKA_STARTING_OFFSETS)
+        .option("failOnDataLoss", KAFKA_FAIL_ON_DATA_LOSS)
+        .option("maxOffsetsPerTrigger", KAFKA_MAX_OFFSETS_PER_TRIGGER)
         .load()
     )
 
@@ -100,7 +116,12 @@ def read_kafka_stream(spark: SparkSession) -> DataFrame:
         .withColumn("event_timestamp", F.to_timestamp("timestamp"))
         .drop("timestamp")
     )
-    return parsed
+    # Deduplication using watermarking (identifies duplicates within the 2m window)
+    deduped = (
+        parsed.withWatermark("event_timestamp", WATERMARK_DELAY)
+        .dropDuplicatesWithinWatermark(["event_id"])
+    )
+    return deduped
 
 # ---------------------------------------------------------------------------
 # Shared JDBC Upsert Helper
@@ -150,8 +171,8 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
             conn.close()
 
     # Scale optimization: Reduce partitions before writing to DB to avoid connection overhead
-    # For this workload size, 1 partition is optimal. For TB-scale, increase this.
-    batch_df.coalesce(1).foreachPartition(upsert_partition)
+    # We use 4 partitions as a balanced default for the 6-partition Kafka input.
+    batch_df.coalesce(4).foreachPartition(upsert_partition)
 
 # ---------------------------------------------------------------------------
 # Sinks with Health Tracking
@@ -164,6 +185,7 @@ _features_health = BatchHealth("feature_store",     failure_threshold=5)
 def write_raw_events_batch(batch_df: DataFrame, batch_id: int) -> None:
     if batch_df.isEmpty():
         return
+    start = time.monotonic()
     try:
         execute_upsert(
             batch_df.select(
@@ -171,22 +193,26 @@ def write_raw_events_batch(batch_df: DataFrame, batch_id: int) -> None:
                 "product_id", "product_name", "category", "quantity",
                 "unit_price", "total_amount", "region", "payment_method",
             ),
-            "order_events", ["event_id"],
+              "order_events", ["event_id"],
             ["event_type", "event_timestamp", "order_id", "product_id",
              "product_name", "category", "quantity", "unit_price",
              "total_amount", "region", "payment_method"],
         )
         _raw_health.record_success()
+        SPARK_RECORDS_PROCESSED.labels(sink="order_events").inc(batch_df.count())
     except Exception as e:
         _raw_health.record_failure(e)
         logger.error("Failed to write raw events batch %d: %s", batch_id, e)
         if not _raw_health.is_healthy:
             raise
+    finally:
+        SPARK_BATCH_DURATION.labels(sink="order_events").observe(time.monotonic() - start)
 
 
 def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
     if batch_df.isEmpty():
         return
+    start = time.monotonic()
     try:
         execute_upsert(
             batch_df, "revenue_metrics",
@@ -194,12 +220,14 @@ def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
             ["order_count", "total_revenue", "avg_order_value"],
         )
         _metrics_health.record_success()
+        SPARK_RECORDS_PROCESSED.labels(sink="revenue_metrics").inc(batch_df.count())
     except Exception as e:
         _metrics_health.record_failure(e)
         logger.error("Failed to write metrics batch %d: %s", batch_id, e)
-        # Re-raise so Spark marks the batch as failed and replays from checkpoint
         if not _metrics_health.is_healthy:
             raise
+    finally:
+        SPARK_BATCH_DURATION.labels(sink="revenue_metrics").observe(time.monotonic() - start)
 
 
 def main() -> None:
@@ -214,8 +242,7 @@ def main() -> None:
 
     # Aggregator
     agg_df = (
-        events.withWatermark("event_timestamp", WATERMARK_DELAY)
-        .groupBy(F.window("event_timestamp", WINDOW_DURATION), "category", "region")
+        events.groupBy(F.window("event_timestamp", WINDOW_DURATION), "category", "region")
         .agg(
             F.count("order_id").alias("order_count"),
             F.sum("total_amount").alias("total_revenue"),
@@ -230,67 +257,141 @@ def main() -> None:
         )
     )
 
-    # Feature Store Aggregation directamente off the streaming events
-    feature_agg = (
-        events.withWatermark("event_timestamp", "2 minutes")
-        .groupBy(
+    # 1. 5-minute base features
+    feature_agg_5m = (
+        events.groupBy(
             F.window("event_timestamp", "5 minutes"),
             "category", "region"
         )
         .agg(
             F.round(F.sum("total_amount"), 2).alias("revenue_last_5m"),
             F.count("order_id").alias("orders_last_5m"),
-            F.round(F.avg("total_amount"), 2).alias("avg_order_value_last_5m"),
         )
-        .withColumn("computed_at", F.current_timestamp())
     )
 
-    def write_features_direct(batch_df: DataFrame, batch_id: int) -> None:
+    # 2. 15-minute sliding window features
+    feature_agg_15m = (
+        events.groupBy(
+            F.window("event_timestamp", "15 minutes", "5 minutes"),
+            "category", "region"
+        )
+        .agg(
+            F.round(F.sum("total_amount"), 2).alias("revenue_last_15m"),
+            F.count("order_id").alias("orders_last_15m"),
+            F.round(F.avg("total_amount"), 2).alias("avg_order_value_last_15m"),
+        )
+    )
+
+    # 3. 60-minute sliding window features
+    feature_agg_60m = (
+        events.groupBy(
+            F.window("event_timestamp", "60 minutes", "5 minutes"),
+            "category", "region"
+        )
+        .agg(
+            F.round(F.sum("total_amount"), 2).alias("revenue_last_60m"),
+            F.count("order_id").alias("orders_last_60m")
+        )
+    )
+
+    def write_features_5m(batch_df: DataFrame, batch_id: int) -> None:
         if batch_df.isEmpty():
             return
+        start = time.monotonic()
         try:
-            # IMPORTANT: For production, these should be calculated using actual 15m/60m sliding windows.
-            # Using 5m data as proxy for demonstration.
             feats = batch_df.select(
-                "computed_at", "category", "region",
-                F.col("revenue_last_5m"),
-                (F.col("revenue_last_5m") * 3).alias("revenue_last_15m"), # Approximated
-                (F.col("revenue_last_5m") * 12).alias("revenue_last_60m"), # Approximated
-                F.col("orders_last_5m"),
-                (F.col("orders_last_5m") * 3).alias("orders_last_15m"), # Approximated
-                (F.col("orders_last_5m") * 12).alias("orders_last_60m"), # Approximated
-                F.col("avg_order_value_last_5m").alias("avg_order_value_last_15m"),
-                F.lit(0.0).alias("revenue_trend_pct")
+                F.col("window.end").alias("computed_at"),
+                "category", "region",
+                "revenue_last_5m",
+                "orders_last_5m",
             )
             execute_upsert(
                 feats, "feature_store",
                 ["computed_at", "category", "region"],
-                ["revenue_last_5m", "orders_last_5m", "avg_order_value_last_15m"]
+                ["revenue_last_5m", "orders_last_5m"]
             )
+            _features_health.record_success()
+            SPARK_RECORDS_PROCESSED.labels(sink="feature_store_5m").inc(batch_df.count())
+        except Exception as e:
+            _features_health.record_failure(e)
+            logger.error("Failed to write 5m features batch %d: %s", batch_id, e)
+        finally:
+            SPARK_BATCH_DURATION.labels(sink="feature_store_5m").observe(time.monotonic() - start)
+
+    def write_features_15m(batch_df: DataFrame, batch_id: int) -> None:
+        if batch_df.isEmpty():
+            return
+        start = time.monotonic()
+        try:
+            feats = batch_df.select(
+                F.col("window.end").alias("computed_at"),
+                "category", "region",
+                "revenue_last_15m",
+                "orders_last_15m",
+                "avg_order_value_last_15m",
+            )
+            execute_upsert(
+                feats, "feature_store",
+                ["computed_at", "category", "region"],
+                ["revenue_last_15m", "orders_last_15m", "avg_order_value_last_15m"]
+            )
+            SPARK_RECORDS_PROCESSED.labels(sink="feature_store_15m").inc(batch_df.count())
+        except Exception as e:
+            logger.error("Failed to write 15m features batch %d: %s", batch_id, e)
+        finally:
+            SPARK_BATCH_DURATION.labels(sink="feature_store_15m").observe(time.monotonic() - start)
+
+    def write_features_60m(batch_df: DataFrame, batch_id: int) -> None:
+        if batch_df.isEmpty():
+            return
+        start = time.monotonic()
+        try:
+            feats = batch_df.select(
+                F.col("window.end").alias("computed_at"),
+                "category", "region",
+                "revenue_last_60m",
+                "orders_last_60m",
+            )
+            execute_upsert(
+                feats, "feature_store",
+                ["computed_at", "category", "region"],
+                ["revenue_last_60m", "orders_last_60m"]
+            )
+            SPARK_RECORDS_PROCESSED.labels(sink="feature_store_60m").inc(batch_df.count())
 
             # After writing new features, purge rows older than 2 hours
             # Moved to a more efficient batching approach to minimize DB hits
-            import psycopg2
-            with psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASSWORD) as conn:
-                with conn.cursor() as cur:
-                    # Optimized: Only delete every 10 batches to reduce overhead
-                    if batch_id % 10 == 0:
+            # After writing new features, purge rows older than 2 hours
+            # Minimal impact check: only run every 10th batch
+            if batch_id % 10 == 0:
+                import psycopg2
+                with psycopg2.connect(
+                    host=PG_HOST,
+                    port=PG_PORT,
+                    dbname=PG_DB,
+                    user=PG_USER,
+                    password=PG_PASSWORD,
+                ) as conn:
+                    with conn.cursor() as cur:
                         cur.execute(
                             "DELETE FROM feature_store WHERE computed_at < NOW() - INTERVAL '2 hours'"
                         )
-                conn.commit()
+                    conn.commit()
 
             _features_health.record_success()
         except Exception as e:
             _features_health.record_failure(e)
-            logger.error("Failed to write features batch %d: %s", batch_id, e)
-            if not _features_health.is_healthy:
-                raise
+            logger.error("Failed to write 60m features batch %d: %s", batch_id, e)
+        finally:
+            SPARK_BATCH_DURATION.labels(sink="feature_store_60m").observe(time.monotonic() - start)
 
     # Queries
     events.writeStream.foreachBatch(write_raw_events_batch).option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_events").start()
     agg_df.writeStream.foreachBatch(write_metrics_batch).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/revenue_metrics").start()
-    feature_agg.writeStream.foreachBatch(write_features_direct).option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_direct").trigger(processingTime="60 seconds").start()
+    
+    feature_agg_5m.writeStream.foreachBatch(write_features_5m).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_5m").start()
+    feature_agg_15m.writeStream.foreachBatch(write_features_15m).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_15m").start()
+    feature_agg_60m.writeStream.foreachBatch(write_features_60m).outputMode("update").option("checkpointLocation", f"{CHECKPOINT_DIR}/feature_store_60m").start()
 
     logger.info("Spark streaming started")
     try:

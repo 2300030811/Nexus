@@ -16,6 +16,7 @@ from psycopg2.extras import execute_values
 
 from common.logging_utils import get_logger
 from common.db_utils import get_connection_pool
+from common.metrics import DLQ_PENDING, DLQ_EXHAUSTED
 
 logger = get_logger("nexus.dlq")
 
@@ -62,10 +63,15 @@ class DeadLetterQueue:
                     )
                 """)
                 # Partial index for fast lookups of pending work
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_dlq_pending 
-                    ON dlq_events (first_failed) WHERE resolved = FALSE AND retry_count < 5
+                cur.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_dlq_pending
+                    ON dlq_events (first_failed)
+                    WHERE resolved = FALSE AND retry_count < {self._max_retries}
                 """)
+                
+                # Initialize metric
+                cur.execute("SELECT COUNT(*) FROM dlq_events WHERE resolved = FALSE AND retry_count < %s", (self._max_retries,))
+                DLQ_PENDING.set(cur.fetchone()[0])
             conn.commit()
         finally:
             self._pool.putconn(conn)
@@ -98,6 +104,7 @@ class DeadLetterQueue:
                             [(json.dumps(e), err) for e, err in batch]
                         )
                     conn.commit()
+                    DLQ_PENDING.inc(len(batch))
                     logger.info("DLQ: Persisted batch of %d failures", len(batch))
                 finally:
                     self._pool.putconn(conn)
@@ -160,7 +167,21 @@ class DeadLetterQueue:
             conn.commit()
             
             if resolved:
+                DLQ_PENDING.dec(len(resolved))
                 logger.info("DLQ: Successfully re-ingested %d events", len(resolved))
+
+            # Track exhausted events
+            if failed:
+                exhausted_count = 0
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM dlq_events WHERE id = ANY(%s) AND retry_count >= %s", 
+                              ([f[0] for f in failed], self._max_retries))
+                    exhausted_count = cur.fetchone()[0]
+                
+                if exhausted_count > 0:
+                    DLQ_EXHAUSTED.inc(exhausted_count)
+                    DLQ_PENDING.dec(exhausted_count)
+                    logger.warning("DLQ: %d events reached max retries and are now exhausted", exhausted_count)
                 
         except Exception as e:
             conn.rollback()
@@ -195,7 +216,8 @@ class DeadLetterQueue:
             from common.db_utils import close_connection_pool
             close_connection_pool()
         
-        self._executor.shutdown(wait=True)
+        self._writer_thread.join(timeout=10)
+        self._retry_thread.join(timeout=10)
 
     def _flush_batch(self, batch):
         """Helper to flush a batch to the DB outside the main loop."""

@@ -9,7 +9,7 @@ def test_system_connectivity():
     """
     services = {
         "FastAPI (Port 8000)": "http://localhost:8000/health",
-        "Prometheus Metrics (Port 9090)": "http://localhost:9090/metrics",
+        "Prometheus Metrics (Port 9099)": "http://localhost:9099/metrics",
         "Dashboard (Port 8501)": "http://localhost:8501",
         "Ollama API (Port 11434)": "http://localhost:11434/api/tags"
     }
@@ -38,14 +38,19 @@ def test_system_connectivity():
 def test_api_data_flow():
     """Check if the API returns data."""
     print("\n--- Nexus API Data Flow Check ---")
+    endpoints = [
+        "http://localhost:8000/api/v1/kpis",
+        "http://localhost:8000/api/kpis",
+    ]
     try:
-        resp = requests.get("http://localhost:8000/api/kpis", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"✅ API KPI Endpoint: SUCCESS")
-            print(f"   Current Revenue: ₹{data.get('revenue', 0):,.2f}")
-        else:
-            print(f"❌ API KPI Endpoint: FAILED ({resp.status_code})")
+        for url in endpoints:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"✅ API KPI Endpoint: SUCCESS ({url})")
+                print(f"   Current Revenue: ₹{data.get('revenue', 0):,.2f}")
+                return
+        print(f"❌ API KPI Endpoint: FAILED ({resp.status_code})")
     except Exception as e:
         print(f"❌ API KPI Endpoint: UNREACHABLE")
 

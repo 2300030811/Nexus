@@ -9,16 +9,15 @@ import psycopg2
 from psycopg2 import pool
 
 
+from common.config import load_config
+
+
 def get_db_config() -> dict:
-    """Get database configuration from environment variables."""
-    return {
-        'host': os.getenv("PG_HOST", "postgres"),
-        'port': os.getenv("PG_PORT", "5432"),
-        'dbname': os.getenv("PG_DB", "nexus"),
-        'user': os.getenv("PG_USER", "nexus"),
-        'password': os.getenv("PG_PASSWORD", "nexus_password"),
-        'connect_timeout': 5,
-    }
+    """Get database configuration from centralized config."""
+    config = load_config()
+    db = config['database']
+    db['connect_timeout'] = 5
+    return db
 
 
 _connection_pool: Optional[pool.ThreadedConnectionPool] = None

@@ -3,6 +3,9 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - "alerts.yml"
+
 scrape_configs:
   - job_name: nexus-producer
     static_configs:
@@ -15,4 +18,8 @@ scrape_configs:
   - job_name: nexus-ai-copilot
     static_configs:
       - targets: ["ai-copilot:9093"]
+
+  - job_name: nexus-spark
+    static_configs:
+      - targets: ["spark-processor:9092"]
 

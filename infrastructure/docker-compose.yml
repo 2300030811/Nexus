@@ -74,6 +74,9 @@ services:
     environment:
       KAFKA_BROKER: ${KAFKA_BROKER}
       KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_STARTING_OFFSETS: ${KAFKA_STARTING_OFFSETS:-latest}
+      KAFKA_FAIL_ON_DATA_LOSS: ${KAFKA_FAIL_ON_DATA_LOSS:-false}
+      KAFKA_MAX_OFFSETS_PER_TRIGGER: ${KAFKA_MAX_OFFSETS_PER_TRIGGER:-10000}
       PG_HOST: ${PG_HOST}
       PG_PORT: ${PG_PORT}
       PG_DB: ${PG_DB}
@@ -105,8 +108,8 @@ services:
       POSTGRES_DB: ${PG_DB}
       POSTGRES_USER: ${PG_USER}
       POSTGRES_PASSWORD: ${PG_PASSWORD}
-    ports:
-      - "5432:5432"
+    # ports:
+    #   - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../data_warehouse/migrations:/docker-entrypoint-initdb.d/migrations:ro
@@ -147,6 +150,25 @@ services:
       - data
     logging: *default-logging
 
+  drift-cron:
+    build:
+      context: ..
+      dockerfile: ml_models/Dockerfile
+    container_name: nexus-drift-cron
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: [../.env]
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "while true; do
+        python drift_monitor.py
+        sleep 21600
+      done"
+    restart: on-failure
+    networks: [backend, data]
+    logging: *default-logging
+
   spark-processor:
     build:
       context: ..
@@ -168,6 +190,7 @@ services:
       PG_USER: ${PG_USER}
       PG_PASSWORD: ${PG_PASSWORD}
       CHECKPOINT_DIR: ${CHECKPOINT_DIR}
+      METRICS_PORT: "9092"
     volumes:
       - spark_checkpoints:/opt/spark-checkpoints
     restart: on-failure
@@ -221,8 +244,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: nexus-ollama
-    ports:
-      - "11434:11434"
+    # ports:
+    #   - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:
@@ -367,6 +390,7 @@ services:
       - "9099:9090"
     volumes:
       - ../infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infrastructure/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

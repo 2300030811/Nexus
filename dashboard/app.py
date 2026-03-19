@@ -22,11 +22,19 @@ def check_password():
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
 
+    env = os.getenv("ENV", "development").strip().lower()
+    dashboard_password = os.getenv("DASHBOARD_PASSWORD", "").strip()
+    if not dashboard_password:
+        if env in {"development", "local", "test"}:
+            dashboard_password = "dev-dashboard-password"
+        else:
+            st.error("DASHBOARD_PASSWORD is not configured. Refusing insecure startup.")
+            return False
+
     if not st.session_state.password_correct:
         # Password not correct, show input + instructions.
         st.warning("⚠️ Dashboard access restricted. Please enter password.")
         password = st.text_input("Password", type="password", key="password_input")
-        dashboard_password = os.getenv("DASHBOARD_PASSWORD", "nexus_secure_pass_123")
         if password == dashboard_password:
             st.session_state.password_correct = True
             st.rerun()
@@ -43,13 +51,28 @@ def check_password():
 def get_pool():
     return get_connection_pool(minconn=1, maxconn=10)
 
+
+def _call_cached_safely(func, *args, **kwargs):
+    """Handle rare Streamlit cache KeyError races without crashing the app."""
+    try:
+        return func(*args, **kwargs)
+    except KeyError:
+        # Streamlit occasionally raises KeyError while reading expired in-memory cache entries.
+        # Clearing this function's cache and retrying once avoids a full app crash.
+        func.clear()
+        return func(*args, **kwargs)
+
 def run_query(query: str, params: tuple = ()) -> pd.DataFrame:
     """Execute a SELECT query and return results as DataFrame."""
     try:
         pool = get_pool()
         conn = pool.getconn()
         try:
-            return pd.read_sql(query, conn, params=params)
+            with conn.cursor() as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+            return pd.DataFrame(rows, columns=columns)
         except Exception as e:
             conn.rollback()
             raise e
@@ -61,18 +84,18 @@ def run_query(query: str, params: tuple = ()) -> pd.DataFrame:
         return pd.DataFrame()
 
 def run_update(query: str, params: tuple = ()):
-    """Execute an INSERT/UPDATE/DELETE query."""
+    """Execute an INSERT/UPDATE/DELETE query. Raises on failure."""
+    pool = get_pool()
+    conn = pool.getconn()
     try:
-        pool = get_pool()
-        conn = pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-            conn.commit()
-        finally:
-            pool.putconn(conn)
-    except Exception as e:
-        st.error(f"Database update error: {str(e)}")
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
 
 # ---------------------------------------------------------------------------
 # Data functions
@@ -91,8 +114,27 @@ def load_kpis(minutes: int) -> dict:
         row = run_query(query, (minutes, minutes))
         
         row_data = row.iloc[0]
-        orders = int(row_data["total_orders"]) if not pd.isna(row_data["total_orders"]) else 0
-        revenue = float(row_data["total_revenue"]) if not pd.isna(row_data["total_revenue"]) else 0.0
+        orders = int(row_data["total_orders"]) if not pd.isna(row_data["total_orders"]) else None
+        revenue = float(row_data["total_revenue"]) if not pd.isna(row_data["total_revenue"]) else None
+
+        # Fallback when revenue_metrics is temporarily empty or delayed.
+        if orders is None or revenue is None:
+            raw_df = run_query(
+                """
+                SELECT
+                    COUNT(*)::bigint AS total_orders,
+                    COALESCE(SUM(total_amount), 0)::double precision AS total_revenue
+                FROM order_events
+                WHERE event_timestamp >= NOW() - (%s * INTERVAL '1 minute')
+                """,
+                (minutes,)
+            )
+            if not raw_df.empty:
+                orders = int(raw_df.iloc[0]["total_orders"])
+                revenue = float(raw_df.iloc[0]["total_revenue"])
+
+        orders = orders or 0
+        revenue = revenue or 0.0
         open_anom = int(row_data["open_anomalies"]) if not pd.isna(row_data["open_anomalies"]) else 0
         total_reps = int(row_data["total_reports"]) if not pd.isna(row_data["total_reports"]) else 0
         
@@ -114,9 +156,16 @@ def load_system_health() -> dict:
         # We can't use revenue_metrics for near-instant ingestion status, 
         # so we scan a small window of order_events. 
         # But we limit it to just the count.
-        epm_check = run_query("SELECT COUNT(*) as count FROM order_events WHERE ingested_at >= NOW() - INTERVAL '5 minutes'")
+        epm_check = run_query("""
+            SELECT
+                COUNT(*) as count,
+                MAX(ingested_at) as last_ingested
+            FROM order_events
+            WHERE ingested_at >= NOW() - INTERVAL '5 minutes'
+        """)
         event_count = int(epm_check["count"].iloc[0]) if not epm_check.empty else 0
         epm = round(event_count / 5.0, 1)
+        last_ingested = epm_check["last_ingested"].iloc[0] if not epm_check.empty else None
         
         # Estimate latency using a small sample
         latency_df = run_query("""
@@ -128,17 +177,76 @@ def load_system_health() -> dict:
         last_pred_df = run_query("SELECT MAX(detected_at) as last FROM anomalies")
         last_pred = last_pred_df["last"].iloc[0] if not last_pred_df.empty and last_pred_df["last"].iloc[0] else None
         
-        kafka_connected = event_count > 0 # Based on 5m window
+        # Keep status resilient to slow traffic while still flagging true disconnects.
+        kafka_connected = event_count > 0
+        kafka_stalled = False
+        if last_ingested is not None:
+            age_seconds = (datetime.now() - last_ingested.replace(tzinfo=None)).total_seconds()
+            kafka_stalled = age_seconds > 120
+            kafka_connected = age_seconds <= 600
         
         return {
             "epm": epm,
             "latency": latency,
             "last_pred": last_pred,
-            "kafka_connected": kafka_connected
+            "kafka_connected": kafka_connected,
+            "kafka_stalled": kafka_stalled,
         }
     except Exception as e:
         st.warning(f"Health load error: {str(e)}")
-        return {"epm": 0, "latency": 0.0, "last_pred": None, "kafka_connected": False}
+        return {"epm": 0, "latency": 0.0, "last_pred": None, "kafka_connected": False, "kafka_stalled": False}
+
+
+def load_revenue_trend(minutes: int) -> tuple[pd.DataFrame, bool]:
+    """Return trend data and whether fallback query was used."""
+    trend_df = run_query("""
+        SELECT window_start, SUM(total_revenue) as total_rev
+        FROM revenue_metrics
+        WHERE window_start >= NOW() - (%s * INTERVAL '1 minute')
+        GROUP BY window_start
+        ORDER BY window_start
+    """, (minutes,))
+    if not trend_df.empty:
+        return trend_df, False
+
+    fallback_df = run_query("""
+        SELECT
+            date_bin(INTERVAL '5 minutes', event_timestamp, TIMESTAMP '2001-01-01') as window_start,
+            SUM(total_amount) as total_rev
+        FROM order_events
+        WHERE event_timestamp >= NOW() - (%s * INTERVAL '1 minute')
+        GROUP BY 1
+        ORDER BY 1
+    """, (minutes,))
+    return fallback_df, True
+
+
+def load_category_revenue(minutes: int) -> tuple[pd.DataFrame, bool]:
+    df = run_query(
+        "SELECT category, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY category ORDER BY rev DESC",
+        (minutes,)
+    )
+    if not df.empty:
+        return df, False
+    fallback_df = run_query(
+        "SELECT category, SUM(total_amount) as rev FROM order_events WHERE event_timestamp >= NOW() - (%s * INTERVAL '1 minute') GROUP BY category ORDER BY rev DESC",
+        (minutes,)
+    )
+    return fallback_df, True
+
+
+def load_regional_revenue(minutes: int) -> tuple[pd.DataFrame, bool]:
+    df = run_query(
+        "SELECT region, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY region ORDER BY rev DESC",
+        (minutes,)
+    )
+    if not df.empty:
+        return df, False
+    fallback_df = run_query(
+        "SELECT region, SUM(total_amount) as rev FROM order_events WHERE event_timestamp >= NOW() - (%s * INTERVAL '1 minute') GROUP BY region ORDER BY rev DESC",
+        (minutes,)
+    )
+    return fallback_df, True
 
 def get_simulation_mode() -> bool:
     res = run_query("SELECT value FROM app_config WHERE key = 'simulate_stockout'")
@@ -219,9 +327,22 @@ with col_time:
 
 # Sidebar
 st.sidebar.header("Demo Controls")
+
+# Show any error/success message preserved across the st.rerun() boundary
+if "_demo_error" in st.session_state:
+    st.sidebar.error(st.session_state.pop("_demo_error"))
+if "_demo_success" in st.session_state:
+    st.sidebar.success(st.session_state.pop("_demo_success"))
+
 sim_mode = get_simulation_mode()
 if st.sidebar.button("🔴 Force iPhone Stockout" if not sim_mode else "🟢 Restore Normal Operations"):
-    toggle_simulation(not sim_mode)
+    try:
+        toggle_simulation(not sim_mode)
+        st.session_state["_demo_success"] = (
+            "✅ Stockout simulation activated" if not sim_mode else "✅ Normal operations restored"
+        )
+    except Exception as e:
+        st.session_state["_demo_error"] = f"Toggle failed: {e}"
     st.rerun()
 
 if sim_mode:
@@ -230,8 +351,8 @@ if sim_mode:
 lookback = st.sidebar.selectbox("Lookback", [15, 30, 60, 120], index=1, format_func=lambda x: f"{x}m")
 
 # Layout
-kpis = load_kpis(lookback)
-health = load_system_health()
+kpis = _call_cached_safely(load_kpis, lookback)
+health = _call_cached_safely(load_system_health)
 
 st.header("System Health & Throughput")
 h1, h2, h3, h4 = st.columns(4)
@@ -249,7 +370,12 @@ else:
     h3.metric("Last ML Scan", "N/A", help="ML anomaly detection hasn't produced results yet")
 
 # Kafka Status with actual health check
-kafka_status = "🟢 Connected" if health['kafka_connected'] else "🔴 Disconnected"
+if health['kafka_connected'] and health.get('kafka_stalled', False):
+    kafka_status = "🟡 Stalled"
+elif health['kafka_connected']:
+    kafka_status = "🟢 Connected"
+else:
+    kafka_status = "🔴 Disconnected"
 h4.metric("Kafka Status", kafka_status)
 
 st.header("ML Model Health")
@@ -291,13 +417,7 @@ st.header("Revenue Insights")
 
 # Revenue Trend Over Time
 st.subheader("Revenue Trend (5-Min Windows)")
-df_trend = run_query("""
-    SELECT window_start, SUM(total_revenue) as total_rev 
-    FROM revenue_metrics 
-    WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') 
-    GROUP BY window_start 
-    ORDER BY window_start
-""", (lookback,))
+df_trend, trend_fallback = load_revenue_trend(lookback)
 if not df_trend.empty:
     fig_trend = px.line(df_trend, x='window_start', y='total_rev', 
                         labels={'window_start': 'Time', 'total_rev': 'Revenue (₹)'},
@@ -305,13 +425,15 @@ if not df_trend.empty:
     fig_trend.update_traces(line_color='#1f77b4', line_width=2)
     fig_trend.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig_trend, use_container_width=True)
+    if trend_fallback:
+        st.caption("Using raw events fallback because revenue_metrics is not yet populated.")
 else:
     st.info("No revenue data available for selected timeframe")
 
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("Category Revenue")
-    df_cat = run_query("SELECT category, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY category ORDER BY rev DESC", (lookback,))
+    df_cat, cat_fallback = load_category_revenue(lookback)
     if not df_cat.empty:
         fig_cat = px.bar(df_cat, x='category', y='rev', 
                          labels={'category': 'Category', 'rev': 'Revenue (₹)'},
@@ -319,11 +441,13 @@ with c1:
         fig_cat.update_traces(texttemplate='₹%{text:,.0f}', textposition='outside')
         fig_cat.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
         st.plotly_chart(fig_cat, use_container_width=True)
+        if cat_fallback:
+            st.caption("Using raw events fallback for category totals.")
     else:
         st.info("No category data")
 with c2:
     st.subheader("Regional Revenue")
-    df_reg = run_query("SELECT region, SUM(total_revenue) as rev FROM revenue_metrics WHERE window_start >= NOW() - (%s * INTERVAL '1 minute') GROUP BY region ORDER BY rev DESC", (lookback,))
+    df_reg, reg_fallback = load_regional_revenue(lookback)
     if not df_reg.empty:
         fig_reg = px.bar(df_reg, x='region', y='rev',
                          labels={'region': 'Region', 'rev': 'Revenue (₹)'},
@@ -331,6 +455,8 @@ with c2:
         fig_reg.update_traces(texttemplate='₹%{text:,.0f}', textposition='outside')
         fig_reg.update_layout(height=400, margin=dict(l=0, r=0, t=20, b=0), showlegend=False)
         st.plotly_chart(fig_reg, use_container_width=True)
+        if reg_fallback:
+            st.caption("Using raw events fallback for regional totals.")
     else:
         st.info("No regional data")
 

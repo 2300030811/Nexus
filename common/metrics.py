@@ -98,6 +98,37 @@ REPORTS_SAVED = Counter(
 )
 
 # ---------------------------------------------------------------------------
+# Dead Letter Queue Metrics
+# ---------------------------------------------------------------------------
+
+DLQ_PENDING = Gauge(
+    "nexus_dlq_pending_events",
+    "Number of unresolved events in the dead letter queue",
+)
+
+DLQ_EXHAUSTED = Counter(
+    "nexus_dlq_exhausted_total",
+    "Total events that exceeded max retries in DLQ",
+)
+
+# ---------------------------------------------------------------------------
+# Spark Streaming Metrics
+# ---------------------------------------------------------------------------
+
+SPARK_BATCH_DURATION = Histogram(
+    "nexus_spark_batch_processing_seconds",
+    "Time to process a foreachBatch in Spark",
+    ["sink"],
+    buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0],
+)
+
+SPARK_RECORDS_PROCESSED = Counter(
+    "nexus_spark_records_processed_total",
+    "Total records written to sinks by Spark",
+    ["sink"],
+)
+
+# ---------------------------------------------------------------------------
 # Shared DB Metrics
 # ---------------------------------------------------------------------------
 

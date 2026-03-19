@@ -3,9 +3,6 @@ Unit tests for ML pipeline components.
 """
 
 import pytest
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 
 
 class TestExpectedRevenueCalculation:
@@ -69,6 +66,7 @@ class TestEventGeneration:
         event = generate_order_event(simulate_stockout=False)
 
         required_fields = [
+            "schema_version",
             "event_id",
             "event_type",
             "timestamp",
@@ -104,7 +102,7 @@ class TestEventGeneration:
         for _ in range(100):
             event = generate_order_event(simulate_stockout=True)
             if event["region"] == "Delhi" and event["category"] == "Electronics":
-                delhi_electronics_count += 1
+                delhi_electronics_count = delhi_electronics_count + 1
 
         # With stockout active, there should be ZERO Electronics orders from Delhi
         assert delhi_electronics_count == 0, "Stockout should block Delhi Electronics"

@@ -8,17 +8,28 @@ from typing import Any
 
 import psycopg2
 import psycopg2.pool
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, ORJSONResponse
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
-from rate_limit import RateLimitMiddleware
+from cachetools import TTLCache
+
+try:
+    from api_service.rate_limit import RateLimitMiddleware
+    from api_service.auth import verify_api_key
+except ImportError:
+    from rate_limit import RateLimitMiddleware
+    from auth import verify_api_key
 
 from common.db_utils import close_connection_pool, get_connection_pool, get_db_config
 from common.logging_utils import get_logger
 
 logger = get_logger("nexus.api")
+
+# In-memory caches with 30s TTL to reduce DB pressure on dashboard refresh
+kpi_cache = TTLCache(maxsize=10, ttl=30)
+metrics_cache = TTLCache(maxsize=10, ttl=30)
 
 # ---------------------------------------------------------------------------
 # Pydantic Schemas (Service Contracts)
@@ -78,6 +89,9 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 async def lifespan(app: FastAPI):
     """Manage connection pool lifecycle."""
     global _pool
+    env = os.getenv("ENV", "development").strip().lower()
+    if env not in {"development", "local", "test"} and not os.getenv("API_KEY", "").strip():
+        raise RuntimeError("API_KEY must be configured when ENV is not development/local/test")
     _pool = get_connection_pool(minconn=2, maxconn=20)
     logger.info("Database pool initialized via common utilities")
     yield
@@ -89,9 +103,17 @@ app = FastAPI(
     description="Real-time retail intelligence API providing anomalies, AI reports, and business KPIs.",
     version="1.0.0",
     lifespan=lifespan,
+    default_response_class=ORJSONResponse,
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# ---------------------------------------------------------------------------
+# API Versioning
+# ---------------------------------------------------------------------------
+v1_router = APIRouter(prefix="/api/v1")
+# Temporary compatibility router until all clients migrate to /api/v1.
+legacy_router = APIRouter(prefix="/api")
 
 # ---------------------------------------------------------------------------
 # Middleware (Production Readiness)
@@ -103,6 +125,19 @@ async def add_correlation_id(request: Request, call_next):
     request.state.correlation_id = correlation_id
     response: Response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
+    return response
+
+
+@app.middleware("http")
+async def legacy_route_deprecation(request: Request, call_next):
+    """Warn callers on the unversioned /api/* path to migrate to /api/v1/*."""
+    response: Response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith("/api/v1/"):
+        versioned = path.replace("/api/", "/api/v1/", 1)
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = f'<{versioned}>; rel="successor-version"'
+        response.headers["Sunset"] = "Sat, 01 Aug 2026 00:00:00 GMT"
     return response
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8501").split(",")
@@ -140,11 +175,13 @@ def health_check(conn=Depends(get_conn)):
         raise HTTPException(status_code=503, detail="Database unreachable") from e
 
 
-@app.get("/api/anomalies", response_model=PaginatedResponse, tags=["Core"])
+@v1_router.get("/anomalies", response_model=PaginatedResponse, tags=["Core"])
+@legacy_router.get("/anomalies", response_model=PaginatedResponse, tags=["Core"])
 def get_anomalies(
     limit: int = Query(default=10, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    status: str | None = Query(default=None, regex="^(open|acknowledged)$"),
+    status: str | None = Query(default=None, pattern="^(open|acknowledged)$"),
+    _: None = Depends(verify_api_key),
     conn=Depends(get_conn),
 ):
     try:
@@ -183,10 +220,12 @@ def get_anomalies(
         raise HTTPException(status_code=500, detail="Query failed") from e
 
 
-@app.get("/api/reports", response_model=PaginatedResponse, tags=["Core"])
+@v1_router.get("/reports", response_model=PaginatedResponse, tags=["Core"])
+@legacy_router.get("/reports", response_model=PaginatedResponse, tags=["Core"])
 def get_reports(
     limit: int = Query(default=10, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    _: None = Depends(verify_api_key),
     conn=Depends(get_conn),
 ):
     try:
@@ -211,11 +250,17 @@ def get_reports(
         raise HTTPException(status_code=500, detail="Query failed") from e
 
 
-@app.get("/api/kpis", response_model=KPIResponse, tags=["Business"])
+@v1_router.get("/kpis", response_model=KPIResponse, tags=["Business"])
+@legacy_router.get("/kpis", response_model=KPIResponse, tags=["Business"])
 def get_kpis(
     minutes: int = Query(default=30, ge=1, le=1440),
+    _: None = Depends(verify_api_key),
     conn=Depends(get_conn),
 ):
+    memo_key = f"kpis_{minutes}"
+    if memo_key in kpi_cache:
+        return kpi_cache[memo_key]
+
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -230,21 +275,27 @@ def get_kpis(
             row = cur.fetchone()
             orders, revenue, open_anom, total_reports = row
 
-        return {
+        res = {
             "lookback_minutes": minutes,
             "orders": int(orders),
             "revenue": float(revenue),
             "open_anomalies": int(open_anom),
             "total_reports": int(total_reports),
         }
+        kpi_cache[memo_key] = res
+        return res
     except Exception as e:
         logger.error("get_kpis error: %s", e)
         raise HTTPException(status_code=500, detail="Query failed") from e
 
 
-@app.get("/api/metrics/summary", response_model=MetricsSummaryResponse, tags=["Business"])
-def get_metrics_summary(conn=Depends(get_conn)):
+@v1_router.get("/metrics/summary", response_model=MetricsSummaryResponse, tags=["Business"])
+@legacy_router.get("/metrics/summary", response_model=MetricsSummaryResponse, tags=["Business"])
+def get_metrics_summary(_: None = Depends(verify_api_key), conn=Depends(get_conn)):
     """Aggregated summary for the dashboard header cards."""
+    if "metrics_summary" in metrics_cache:
+        return metrics_cache["metrics_summary"]
+
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -257,19 +308,23 @@ def get_metrics_summary(conn=Depends(get_conn)):
                 WHERE detected_at >= NOW() - INTERVAL '24 hours'
             """)
             row = cur.fetchone()
-        return {
-            "critical_24h":  row[0],
-            "high_24h":      row[1],
-            "open_count":    row[2],
+
+        res = {
+            "critical_24h":  row[0] or 0,
+            "high_24h":      row[1] or 0,
+            "open_count":    row[2] or 0,
             "last_detected": row[3] if row[3] else None,
         }
+        metrics_cache["metrics_summary"] = res
+        return res
     except Exception as e:
         logger.error("get_metrics_summary error: %s", e)
         raise HTTPException(status_code=500, detail="Query failed") from e
 
 
-@app.get("/api/anomalies/stream", tags=["Core"])
-async def stream_anomalies(request: Request):
+@v1_router.get("/anomalies/stream", tags=["Core"])
+@legacy_router.get("/anomalies/stream", tags=["Core"])
+async def stream_anomalies(request: Request, _: None = Depends(verify_api_key)):
     """
     Real-time anomaly stream via Server-Sent Events (SSE).
     Differentiator: Demonstrates knowledge of real-time push architectures.
@@ -277,35 +332,43 @@ async def stream_anomalies(request: Request):
     async def event_generator():
         last_id = 0
         while True:
-            # Check for disconnect
             if await request.is_disconnected():
                 break
-
             try:
-                # Use a local connection for the generator
-                cfg = get_db_config()
-                with psycopg2.connect(**cfg) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute(
-                        "SELECT * FROM anomalies WHERE id > %s ORDER BY id ASC",
-                        (last_id,)
-                    )
-                    new_anomalies = cur.fetchall()
-                    for anom in new_anomalies:
-                        last_id = anom["id"]
-                        # Convert datetimes to serializable format
-                        for k, v in anom.items():
-                            if isinstance(v, datetime):
-                                anom[k] = v.isoformat()
-
-                        yield {
-                            "event": "anomaly",
-                            "id": str(anom["id"]),
-                            "data": json.dumps(dict(anom))
-                        }
+                loop = asyncio.get_event_loop()
+                new_anomalies = await loop.run_in_executor(
+                    None, _fetch_new_anomalies, last_id
+                )
+                for anom in new_anomalies:
+                    last_id = anom["id"]
+                    for k, v in anom.items():
+                        if isinstance(v, datetime):
+                            anom[k] = v.isoformat()
+                    yield f"event: anomaly\nid: {anom['id']}\ndata: {json.dumps(dict(anom))}\n\n"
             except Exception as e:
                 logger.error("Stream error: %s", e)
-
-            await asyncio.sleep(5)  # Poll every 5 seconds
+            await asyncio.sleep(5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+def _fetch_new_anomalies(last_id: int) -> list[dict]:
+    """Sync DB fetch using the pool — runs in executor."""
+    if not _pool:
+        return []
+    conn = _pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM anomalies WHERE id > %s ORDER BY id ASC LIMIT 50",
+                (last_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        _pool.putconn(conn)
+
+
+app.include_router(v1_router)
+app.include_router(legacy_router)
+
 

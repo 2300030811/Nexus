@@ -81,8 +81,7 @@ db-shell:
 	$(DC) exec postgres psql -U nexus -d nexus
 
 db-migrate:
-	$(DC) exec postgres psql -U nexus -d nexus \
-	  -c "\i /docker-entrypoint-initdb.d/migrations/apply.sql"
+	python data_warehouse/migrations/apply.py
 
 db-optimize:
 	$(DC) exec anomaly-detector python scripts/db_maintenance.py
@@ -111,9 +110,7 @@ retrain-full:
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 
 clean:
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -name "*.pyc" -delete
-	rm -rf htmlcov/ .coverage .pytest_cache/
+	python -c "import pathlib; [ [p.unlink() if p.is_file() else __import__('shutil').rmtree(p) for p in pathlib.Path('.').rglob(pattern)] for pattern in ['__pycache__', '*.pyc', 'htmlcov', '.coverage', '.pytest_cache'] ]"
 
 clean-volumes:
 	$(DC) down -v
