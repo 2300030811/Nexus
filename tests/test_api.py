@@ -8,7 +8,7 @@ sys.modules["psycopg2"] = MagicMock()
 sys.modules["psycopg2.extras"] = MagicMock()
 sys.modules["psycopg2.pool"] = MagicMock()
 
-from api_service.main import HTTPException, app, get_conn  # noqa: E402
+from api_service.main import HTTPException, app, get_conn, _initial_stream_last_id  # noqa: E402
 from api_service.auth import verify_api_key
 
 client = TestClient(app)
@@ -105,3 +105,32 @@ class TestNexusAPI:
         assert "/api/v1/kpis" in response.headers.get("Link", "")
         assert response.headers.get("Sunset") is not None
         app.dependency_overrides.clear()
+
+    def test_cors_preflight_allows_api_key_header(self):
+        response = client.options(
+            "/api/v1/anomalies",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "X-API-Key",
+            },
+        )
+        assert response.status_code == 200
+        allow_headers = response.headers.get("access-control-allow-headers", "").lower()
+        assert "x-api-key" in allow_headers
+
+    def test_stream_uses_last_event_id_header_when_present(self):
+        request = MagicMock()
+        request.headers.get.side_effect = lambda key: {
+            "Last-Event-ID": "42",
+            "last-event-id": None,
+        }.get(key)
+
+        assert _initial_stream_last_id(request) == 42
+
+    def test_stream_starts_at_live_tail_without_resume_header(self, monkeypatch):
+        request = MagicMock()
+        request.headers.get.return_value = None
+        monkeypatch.setattr("api_service.main._fetch_latest_anomaly_id", lambda: 7)
+
+        assert _initial_stream_last_id(request) == 7

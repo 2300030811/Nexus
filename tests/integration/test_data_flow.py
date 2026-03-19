@@ -55,8 +55,8 @@ def test_order_event_reaches_postgres(db_conn, kafka_producer):
         if row:
             break
         time.sleep(1)
-    # else:
-    #     pytest.fail("Event did not appear in order_events within 10 seconds")
+    else:
+        pytest.fail("Event did not appear in order_events within 10 seconds")
 
 def test_simulation_mode_toggle(db_conn):
     """Toggling simulate_stockout persists to DB."""

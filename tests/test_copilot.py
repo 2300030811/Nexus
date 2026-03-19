@@ -1,5 +1,6 @@
 import pytest
 from ai_copilot.copilot import parse_report
+from ai_copilot import tools
 
 class TestCopilotParseReport:
     """Test the robust regex parsing of LLM reports."""
@@ -61,3 +62,56 @@ Recommended Action: Review the latest warehouse inventory counts.
         assert parsed["confidence"] == 0.15
         assert parsed["root_cause"] == "Unable to determine root cause."
         assert parsed["recommended_action"] == "Manual investigation recommended."
+
+
+class TestCopilotTools:
+    def test_query_restores_connection_autocommit(self, monkeypatch):
+        class DummyCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, sql, params):
+                self.sql = sql
+                self.params = params
+
+            def fetchall(self):
+                return [{"id": 1}]
+
+        class DummyConn:
+            def __init__(self):
+                self.autocommit = False
+
+            def cursor(self, cursor_factory=None):
+                return DummyCursor()
+
+        class DummyPool:
+            def __init__(self, conn):
+                self.conn = conn
+                self.put_calls = []
+
+            def getconn(self):
+                return self.conn
+
+            def putconn(self, conn, close=False):
+                self.put_calls.append((conn, close))
+
+        conn = DummyConn()
+        pool = DummyPool(conn)
+        monkeypatch.setattr(tools, "_get_pool", lambda: pool)
+
+        result = tools._query("SELECT 1")
+
+        assert result == [{"id": 1}]
+        assert conn.autocommit is False
+        assert pool.put_calls == [(conn, False)]
+
+    def test_derive_revenue_trend_falls_back_to_recent_windows(self):
+        trend = tools._derive_revenue_trend(300.0, 1200.0, 0.0)
+        assert trend == pytest.approx(1.0)
+
+    def test_derive_revenue_trend_prefers_stored_value(self):
+        trend = tools._derive_revenue_trend(300.0, 1200.0, 1.25)
+        assert trend == pytest.approx(1.25)

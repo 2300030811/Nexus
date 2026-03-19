@@ -145,7 +145,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization", "X-Correlation-ID"],
+    allow_headers=["Content-Type", "Authorization", "X-Correlation-ID", "X-API-Key"],
 )
 app.add_middleware(RateLimitMiddleware, requests_per_minute=60)
 
@@ -330,7 +330,7 @@ async def stream_anomalies(request: Request, _: None = Depends(verify_api_key)):
     Differentiator: Demonstrates knowledge of real-time push architectures.
     """
     async def event_generator():
-        last_id = 0
+        last_id = _initial_stream_last_id(request)
         while True:
             if await request.is_disconnected():
                 break
@@ -352,6 +352,30 @@ async def stream_anomalies(request: Request, _: None = Depends(verify_api_key)):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+def _initial_stream_last_id(request: Request) -> int:
+    """Start new streams at the live tail, unless the client is resuming."""
+    raw_last_event_id = request.headers.get("Last-Event-ID") or request.headers.get("last-event-id")
+    if raw_last_event_id:
+        try:
+            return max(int(raw_last_event_id), 0)
+        except ValueError:
+            logger.warning("Invalid Last-Event-ID header: %s", raw_last_event_id)
+    return _fetch_latest_anomaly_id()
+
+
+def _fetch_latest_anomaly_id() -> int:
+    """Return the current max anomaly ID so fresh SSE clients only get new events."""
+    if not _pool:
+        return 0
+    conn = _pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(id), 0) FROM anomalies")
+            return int(cur.fetchone()[0] or 0)
+    finally:
+        _pool.putconn(conn)
+
+
 def _fetch_new_anomalies(last_id: int) -> list[dict]:
     """Sync DB fetch using the pool — runs in executor."""
     if not _pool:
@@ -370,5 +394,4 @@ def _fetch_new_anomalies(last_id: int) -> list[dict]:
 
 app.include_router(v1_router)
 app.include_router(legacy_router)
-
 

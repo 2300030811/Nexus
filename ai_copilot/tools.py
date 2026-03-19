@@ -28,6 +28,7 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
     """Execute a read-only query using a pooled connection."""
     pool = _get_pool()
     conn = pool.getconn()
+    previous_autocommit = getattr(conn, "autocommit", False)
     try:
         conn.autocommit = True
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -37,15 +38,31 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
         # Connection died — discard it, get a fresh one, and retry once
         pool.putconn(conn, close=True)
         conn = pool.getconn()
+        previous_autocommit = getattr(conn, "autocommit", False)
         conn.autocommit = True
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
     finally:
         try:
+            conn.autocommit = previous_autocommit
             pool.putconn(conn)
         except Exception:
             pass
+
+
+def _derive_revenue_trend(revenue_last_15m: float, revenue_last_60m: float, stored_trend: float | None) -> float:
+    """Prefer the stored trend when present, otherwise derive it from 15m vs 60m momentum."""
+    if stored_trend not in (None, 0, 0.0):
+        return float(stored_trend)
+    revenue_last_60m = float(revenue_last_60m or 0.0)
+    revenue_last_15m = float(revenue_last_15m or 0.0)
+    if revenue_last_60m <= 0:
+        return 0.0
+    baseline_quarter_hour = revenue_last_60m / 4.0
+    if baseline_quarter_hour <= 0:
+        return 0.0
+    return round(revenue_last_15m / baseline_quarter_hour, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +239,11 @@ def get_feature_snapshot(category: str, region: str) -> str:
         return f"No features found for {category}/{region}."
     lines = [f"Feature snapshot for '{category}' / '{region}':"]
     for r in rows:
-        trend = float(r["revenue_trend_pct"])
+        trend = _derive_revenue_trend(
+            float(r["revenue_last_15m"]),
+            float(r["revenue_last_60m"]),
+            r.get("revenue_trend_pct"),
+        )
         trend_label = "DECLINING" if trend < 0.6 else "STABLE" if trend < 1.4 else "SURGING"
         lines.append(
             f"  {r['computed_at']} | "

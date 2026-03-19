@@ -174,6 +174,32 @@ def execute_upsert(batch_df: DataFrame, table_name: str, constraint_cols: list, 
     # We use 4 partitions as a balanced default for the 6-partition Kafka input.
     batch_df.coalesce(4).foreachPartition(upsert_partition)
 
+
+def refresh_feature_trends() -> None:
+    """Backfill the derived trend field from the most recent feature windows."""
+    import psycopg2
+
+    with psycopg2.connect(
+        host=PG_HOST,
+        port=PG_PORT,
+        dbname=PG_DB,
+        user=PG_USER,
+        password=PG_PASSWORD,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE feature_store
+                SET revenue_trend_pct = CASE
+                    WHEN revenue_last_60m > 0 AND revenue_last_15m > 0
+                        THEN ROUND((revenue_last_15m / NULLIF(revenue_last_60m / 4.0, 0))::numeric, 4)
+                    ELSE 0
+                END
+                WHERE computed_at >= NOW() - INTERVAL '2 hours'
+                """
+            )
+        conn.commit()
+
 # ---------------------------------------------------------------------------
 # Sinks with Health Tracking
 # ---------------------------------------------------------------------------
@@ -335,8 +361,11 @@ def main() -> None:
                 ["computed_at", "category", "region"],
                 ["revenue_last_15m", "orders_last_15m", "avg_order_value_last_15m"]
             )
+            refresh_feature_trends()
+            _features_health.record_success()
             SPARK_RECORDS_PROCESSED.labels(sink="feature_store_15m").inc(batch_df.count())
         except Exception as e:
+            _features_health.record_failure(e)
             logger.error("Failed to write 15m features batch %d: %s", batch_id, e)
         finally:
             SPARK_BATCH_DURATION.labels(sink="feature_store_15m").observe(time.monotonic() - start)
@@ -357,6 +386,7 @@ def main() -> None:
                 ["computed_at", "category", "region"],
                 ["revenue_last_60m", "orders_last_60m"]
             )
+            refresh_feature_trends()
             SPARK_RECORDS_PROCESSED.labels(sink="feature_store_60m").inc(batch_df.count())
 
             # After writing new features, purge rows older than 2 hours
