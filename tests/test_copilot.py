@@ -115,3 +115,54 @@ class TestCopilotTools:
     def test_derive_revenue_trend_prefers_stored_value(self):
         trend = tools._derive_revenue_trend(300.0, 1200.0, 1.25)
         assert trend == pytest.approx(1.25)
+
+    def test_query_pool_safety_on_error(self, monkeypatch):
+        """Ensure connection is returned to pool even if query fails."""
+        class ErrorConn:
+            def cursor(self, **kwargs):
+                raise RuntimeError("DB Explosion")
+            def rollback(self):
+                pass
+            @property
+            def autocommit(self): return False
+            @autocommit.setter
+            def autocommit(self, val): pass
+
+        class DummyPool:
+            def __init__(self):
+                self.conn = ErrorConn()
+                self.put_calls = []
+            def getconn(self):
+                return self.conn
+            def putconn(self, conn, close=False):
+                self.put_calls.append((conn, close))
+
+        pool = DummyPool()
+        monkeypatch.setattr(tools, "_get_pool", lambda: pool)
+
+        with pytest.raises(RuntimeError):
+            tools._query("SELECT 1")
+        
+        # Ensure connection was returned despite error
+        assert len(pool.put_calls) == 1
+        assert pool.put_calls[0][0] == pool.conn
+
+    def test_feature_store_contract_validation(self, monkeypatch):
+        """Test get_feature_snapshot handles DB rows correctly."""
+        mock_data = [{
+            "computed_at": "2026-03-14T10:00:00Z",
+            "revenue_last_5m": 100.0,
+            "revenue_last_15m": 300.0,
+            "revenue_last_60m": 1200.0,
+            "orders_last_5m": 1,
+            "orders_last_15m": 3,
+            "orders_last_60m": 12,
+            "avg_order_value_last_15m": 100.0,
+            "revenue_trend_pct": 1.0
+        }]
+        monkeypatch.setattr(tools, "_query", lambda sql, params: mock_data)
+        
+        result = tools.get_feature_snapshot.invoke({"category": "test", "region": "test"})
+        assert "Snapshot" in result
+        assert "rev 5m=₹100.00" in result
+        assert "trend=1.00 (STABLE)" in result

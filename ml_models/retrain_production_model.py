@@ -77,7 +77,7 @@ def extract_training_data(days: int = 30) -> pd.DataFrame:
                 ON rm.window_start = a.window_start 
                 AND rm.category = a.category 
                 AND rm.region = a.region
-                AND a.status != 'false_positive'
+                AND a.status IN ('open', 'acknowledged', 'resolved')
             WHERE rm.window_start >= NOW() - (%s * INTERVAL '1 day')
         )
         SELECT * FROM labeled_windows

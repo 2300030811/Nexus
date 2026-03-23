@@ -2,8 +2,16 @@ import argparse
 import json
 import random
 import time
+import os
+import sys
 from datetime import datetime, timezone
 from kafka import KafkaProducer
+
+# Add parent directory to path for common imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.logging_utils import get_logger
+
+logger = get_logger("load_generator")
 
 def generate_event(category=None, region=None, anomaly=False):
     categories = ["Electronics", "Clothing", "Home & Garden", "Groceries", "Beauty"]
@@ -45,17 +53,32 @@ def main():
     
     args = parser.parse_args()
     
-    producer = KafkaProducer(
-        bootstrap_servers=args.broker,
-        value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-        acks='all',
-        enable_idempotence=True
-    )
+    logger.info("Starting load generator", extra={
+        "broker": args.broker,
+        "topic": args.topic,
+        "rate": args.rate,
+        "duration": args.duration,
+        "anomaly_probability": args.anomaly_prob
+    })
+    
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=args.broker,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            acks='all',
+            enable_idempotence=True
+        )
+        logger.info("Kafka producer created successfully")
+    except Exception as e:
+        logger.error("Failed to create Kafka producer", extra={"error": str(e)})
+        print(f"Error: Failed to connect to Kafka at {args.broker}")
+        return
     
     print(f"Starting load generation at {args.rate} events/sec targeting {args.topic}...")
     
     start_time = time.time()
     count = 0
+    anomaly_count = 0
     
     try:
         while True:
@@ -63,23 +86,48 @@ def main():
                 break
                 
             is_anomaly = random.random() < args.anomaly_prob
+            if is_anomaly:
+                anomaly_count += 1
+            
             event = generate_event(anomaly=is_anomaly)
             
             producer.send(args.topic, value=event)
             count += 1
             
             if count % 100 == 0:
+                elapsed = time.time() - start_time
+                actual_rate = count / elapsed if elapsed > 0 else 0
+                logger.info("Progress update", extra={
+                    "events_sent": count,
+                    "anomaly_events": anomaly_count,
+                    "elapsed_seconds": elapsed,
+                    "actual_rate": actual_rate
+                })
                 print(f"Sent {count} events...")
                 
             # Sleep to maintain rate
             time.sleep(1.0 / args.rate)
             
     except KeyboardInterrupt:
+        logger.info("Load generator stopped by user")
         print("Stopping load generator...")
+    except Exception as e:
+        logger.error("Load generator error", extra={"error": str(e)})
+        print(f"Error during load generation: {e}")
     finally:
-        producer.flush()
-        producer.close()
-        print(f"Load generation complete. Sent {count} total events.")
+        try:
+            producer.flush()
+            producer.close()
+            elapsed = time.time() - start_time
+            logger.info("Load generation completed", extra={
+                "total_events": count,
+                "anomaly_events": anomaly_count,
+                "elapsed_seconds": elapsed,
+                "final_rate": count / elapsed if elapsed > 0 else 0
+            })
+            print(f"Load generation complete. Sent {count} total events.")
+        except Exception as e:
+            logger.error("Error closing producer", extra={"error": str(e)})
 
 if __name__ == "__main__":
     main()

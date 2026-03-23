@@ -1,0 +1,12 @@
+# PgBouncer user authentication file
+# Format: "username" "md5hash"
+# Generate hash with: echo -n "password" | md5sum | cut -d' ' -f1
+
+# Nexus application user
+"nexus" "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+
+# Admin user
+"postgres" "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
+
+# Stats user (read-only)
+"stats" "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"

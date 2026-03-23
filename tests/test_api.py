@@ -134,3 +134,22 @@ class TestNexusAPI:
         monkeypatch.setattr("api_service.main._fetch_latest_anomaly_id", lambda: 7)
 
         assert _initial_stream_last_id(request) == 7
+
+    def test_sse_endpoint_content_type(self):
+        # We need to mock auth because the middleware might block before the stream starts
+        app.dependency_overrides[verify_api_key] = mock_verify_api_key
+        
+        # We use a context manager because'streaming_response' is a generator
+        with client.stream("GET", "/api/v1/anomalies/stream") as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
+        
+        app.dependency_overrides.clear()
+
+    def test_cors_origin_header(self):
+        response = client.get(
+            "/api/v1/anomalies",
+            headers={"Origin": "http://localhost:8501"}
+        )
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:8501"

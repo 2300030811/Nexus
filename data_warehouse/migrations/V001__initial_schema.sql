@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS order_events (
     total_amount    NUMERIC(10, 2) NOT NULL,
     region          VARCHAR(32) NOT NULL,
     payment_method  VARCHAR(32) NOT NULL,
-    ingested_at     TIMESTAMPTZ DEFAULT NOW()
+    ingested_at     TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT check_quantity_positive CHECK (quantity > 0),
+    CONSTRAINT check_unit_price_non_negative CHECK (unit_price >= 0),
+    CONSTRAINT check_total_amount_non_negative CHECK (total_amount >= 0)
 );
 
 -- Aggregated revenue metrics (written by Spark micro-batches)
@@ -28,7 +31,9 @@ CREATE TABLE IF NOT EXISTS revenue_metrics (
     total_revenue   NUMERIC(12, 2) NOT NULL,
     avg_order_value NUMERIC(10, 2) NOT NULL,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    PRIMARY KEY (window_start, window_end, category, region)
+    PRIMARY KEY (window_start, window_end, category, region),
+    CONSTRAINT check_order_count_non_negative CHECK (order_count >= 0),
+    CONSTRAINT check_total_revenue_non_negative CHECK (total_revenue >= 0)
 );
 
 -- Indexes for common query patterns

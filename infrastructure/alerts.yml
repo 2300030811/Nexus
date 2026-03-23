@@ -36,3 +36,31 @@ groups:
         annotations:
           summary: "Copilot investigation error spike"
           description: "AI copilot has failed more than 3 investigations in the last 15 minutes."
+
+      - alert: HighSparkProcessingLag
+        expr: nexus_spark_processing_lag_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spark processing lag is high"
+          description: "Spark processing is lagging over 60 seconds behind event generation."
+
+      - alert: DataFreshnessViolation
+        expr: nexus_data_freshness_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Stale data processing"
+          description: "No new events have been fully processed into revenue metrics for 5 minutes."
+
+      - alert: ModelDriftDetected
+        expr: (nexus_model_drift_detected_flag == 1 or sum(rate(nexus_anomalies_detected_total[1h])) / clamp_min(sum(rate(nexus_events_produced_total[1h])), 1) > 0.15)
+        for: 15m
+        labels:
+          severity: warning
+          team: mlops
+        annotations:
+          summary: "Model Drift Detected"
+          description: "Data distribution has drifted significantly or anomaly rate has shifted beyond expected baseline. Retraining may be triggered."

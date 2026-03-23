@@ -1,0 +1,74 @@
+version: '3.8'
+
+# Nexus - Production Deployment Profile
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  producer:
+    deploy:
+      replicas: 3
+    restart: always
+    environment:
+      - ENV=production
+
+  spark-processor:
+    deploy:
+      replicas: 2
+    restart: always
+    environment:
+      - ENV=production
+
+  anomaly-detector:
+    deploy:
+      replicas: 2
+    restart: always
+    environment:
+      - ENV=production
+
+  ai-copilot:
+    deploy:
+      replicas: 2
+    restart: always
+    environment:
+      - ENV=production
+
+  api:
+    deploy:
+      replicas: 3
+    restart: always
+    environment:
+      - ENV=production
+    ports:
+      - "80:8000"
+
+  dashboard:
+    deploy:
+      replicas: 2
+    restart: always
+    environment:
+      - ENV=production
+    ports:
+      - "443:8501"
+
+  postgres:
+    restart: always
+    environment:
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets:
+      - db_password
+
+  prometheus:
+    restart: always
+
+  grafana:
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+    secrets:
+      - grafana_admin_password
+
+secrets:
+  db_password:
+    file: ./infrastructure/secrets/prod_db_password.txt
+  grafana_admin_password:
+    file: ./infrastructure/secrets/prod_grafana_password.txt

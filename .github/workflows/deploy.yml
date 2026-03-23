@@ -1,0 +1,245 @@
+name: Nexus Platform Deployment
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: nexus-platform
+
+jobs:
+  security-scan:
+    name: Pre-deployment Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  build-and-push:
+    name: Build and Push Images
+    runs-on: ubuntu-latest
+    needs: security-scan
+    permissions:
+      contents: read
+      packages: write
+    
+    strategy:
+      matrix:
+        service: [api_service, ml_models, ai_copilot, kafka_producer, dashboard]
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=sha,prefix={{branch}}-
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ${{ matrix.service }}/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Update image tags in deployment manifests
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/api_service:${{ github.sha }}|g" k8s/staging/api-service.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/ml_models:${{ github.sha }}|g" k8s/staging/ml-models.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/ai_copilot:${{ github.sha }}|g" k8s/staging/ai-copilot.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/kafka_producer:${{ github.sha }}|g" k8s/staging/kafka-producer.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/dashboard:${{ github.sha }}|g" k8s/staging/dashboard.yaml
+        
+        # Apply manifests
+        kubectl apply -f k8s/staging/ -n nexus-staging
+        
+        # Wait for rollout
+        kubectl rollout status deployment/api-service -n nexus-staging --timeout=300s
+        kubectl rollout status deployment/ml-models -n nexus-staging --timeout=300s
+        kubectl rollout status deployment/ai-copilot -n nexus-staging --timeout=300s
+        kubectl rollout status deployment/kafka-producer -n nexus-staging --timeout=300s
+        kubectl rollout status deployment/dashboard -n nexus-staging --timeout=300s
+
+    - name: Run smoke tests
+      run: |
+        # Wait for services to be ready
+        sleep 30
+        
+        # Test API endpoints
+        curl -f http://staging.nexus-platform.com/health || exit 1
+        curl -f http://staging.nexus-platform.com/api/v1/kpis || exit 1
+        
+        # Test authentication
+        curl -X POST http://staging.nexus-platform.com/api/v1/auth/login \
+          -H "Content-Type: application/json" \
+          -d '{"username":"admin","password":"test"}' || exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    environment: production
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Update image tags in deployment manifests
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/api_service:${{ github.sha }}|g" k8s/production/api-service.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/ml_models:${{ github.sha }}|g" k8s/production/ml-models.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/ai_copilot:${{ github.sha }}|g" k8s/production/ai-copilot.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/kafka_producer:${{ github.sha }}|g" k8s/production/kafka-producer.yaml
+        sed -i "s|image: nexus-.*:latest|image: ${{ env.REGISTRY }}/${{ github.repository }}/dashboard:${{ github.sha }}|g" k8s/production/dashboard.yaml
+        
+        # Apply manifests with zero-downtime strategy
+        kubectl apply -f k8s/production/ -n nexus-production
+        
+        # Wait for rollout
+        kubectl rollout status deployment/api-service -n nexus-production --timeout=600s
+        kubectl rollout status deployment/ml-models -n nexus-production --timeout=600s
+        kubectl rollout status deployment/ai-copilot -n nexus-production --timeout=600s
+        kubectl rollout status deployment/kafka-producer -n nexus-production --timeout=600s
+        kubectl rollout status deployment/dashboard -n nexus-production --timeout=600s
+
+    - name: Run production smoke tests
+      run: |
+        # Wait for services to be ready
+        sleep 60
+        
+        # Test API endpoints
+        curl -f https://nexus-platform.com/health || exit 1
+        curl -f https://nexus-platform.com/api/v1/kpis || exit 1
+        
+        # Test authentication
+        curl -X POST https://nexus-platform.com/api/v1/auth/login \
+          -H "Content-Type: application/json" \
+          -d '{"username":"admin","password":"test"}' || exit 1
+
+    - name: Notify Slack
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        text: |
+          Production deployment ${{ job.status }}!
+          Commit: ${{ github.sha }}
+          Tag: ${{ github.ref_name }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: failure() && startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure kubectl
+      uses: azure/k8s-set-context@v3
+      with:
+        method: kubeconfig
+        kubeconfig: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+
+    - name: Rollback deployment
+      run: |
+        # Rollback to previous revision
+        kubectl rollout undo deployment/api-service -n nexus-production
+        kubectl rollout undo deployment/ml-models -n nexus-production
+        kubectl rollout undo deployment/ai-copilot -n nexus-production
+        kubectl rollout undo deployment/kafka-producer -n nexus-production
+        kubectl rollout undo deployment/dashboard -n nexus-production
+        
+        # Wait for rollback
+        kubectl rollout status deployment/api-service -n nexus-production --timeout=300s
+        kubectl rollout status deployment/ml-models -n nexus-production --timeout=300s
+        kubectl rollout status deployment/ai-copilot -n nexus-production --timeout=300s
+        kubectl rollout status deployment/kafka-producer -n nexus-production --timeout=300s
+        kubectl rollout status deployment/dashboard -n nexus-production --timeout=300s
+
+    - name: Notify Slack about rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: 'failure'
+        channel: '#deployments'
+        text: |
+          Production deployment failed - ROLLED BACK!
+          Commit: ${{ github.sha }}
+          Tag: ${{ github.ref_name }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

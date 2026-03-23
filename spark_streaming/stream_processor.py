@@ -60,8 +60,7 @@ PG_PROPERTIES = {
     "driver": "org.postgresql.Driver",
 }
 
-WINDOW_DURATION = "5 minutes"
-WATERMARK_DELAY = "2 minutes"
+from common.features import WINDOW_DURATION, WATERMARK_DELAY
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/opt/spark-checkpoints")
 
 ORDER_SCHEMA = StructType([
@@ -256,12 +255,40 @@ def write_metrics_batch(batch_df: DataFrame, batch_id: int) -> None:
         SPARK_BATCH_DURATION.labels(sink="revenue_metrics").observe(time.monotonic() - start)
 
 
+def cleanup_corrupted_checkpoints():
+    """Remove corrupted checkpoint directories to allow fresh start."""
+    import shutil
+    checkpoint_base = os.getenv("CHECKPOINT_DIR", "/opt/spark-checkpoints")
+    
+    # Check each checkpoint subdirectory
+    for subdir in ["raw_events", "revenue_metrics", "feature_store_5m", "feature_store_15m", "feature_store_60m"]:
+        checkpoint_path = os.path.join(checkpoint_base, subdir)
+        if os.path.exists(checkpoint_path):
+            # Check for state directory which contains delta files
+            state_path = os.path.join(checkpoint_path, "state")
+            if os.path.exists(state_path):
+                try:
+                    # Try to list files - if this fails, directory is corrupted
+                    test_list = os.listdir(state_path)
+                    logger.info("Checkpoint %s appears valid (%d entries)", subdir, len(test_list))
+                except Exception as e:
+                    logger.warning("Checkpoint %s appears corrupted: %s. Removing...", subdir, e)
+                    try:
+                        shutil.rmtree(checkpoint_path)
+                        logger.info("Removed corrupted checkpoint: %s", checkpoint_path)
+                    except Exception as rm_err:
+                        logger.error("Failed to remove checkpoint %s: %s", subdir, rm_err)
+
+
 def main() -> None:
     # Start Prometheus metrics endpoint
     metrics_port = int(os.getenv("METRICS_PORT", "9092"))
     start_metrics_server(metrics_port)
     logger.info("Spark metrics available on port %d", metrics_port)
-
+    
+    # Clean up corrupted checkpoints before starting
+    cleanup_corrupted_checkpoints()
+    
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
     events = read_kafka_stream(spark)

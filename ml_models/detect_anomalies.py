@@ -24,6 +24,7 @@ from common.constants import (
     CATEGORY_MAP, REGION_MAP, CATEGORY_BASELINES, REGION_WEIGHTS,
     FEATURE_COLUMNS, get_hour_factor, get_dow_factor, classify_severity
 )
+from common.features import compute_expected_revenue
 from common.db_utils import get_single_connection, close_connection, get_db_config
 from common.logging_utils import get_logger
 from common.metrics import (
@@ -72,15 +73,6 @@ def load_model(path: str) -> xgb.XGBClassifier:
     return model
 
 
-def compute_expected_revenue(category: str, region: str, hour: int, dow: int) -> float:
-    """Recompute expected revenue using the same logic as training data gen."""
-    base = CATEGORY_BASELINES.get(category, 300.0)
-    region_w = REGION_WEIGHTS.get(region, 0.15)
-    hf = get_hour_factor(hour)
-    df = get_dow_factor(dow)
-    return round(base * region_w * hf * df, 2)
-
-
 def fetch_recent_metrics(conn, lookback_minutes: int = 10) -> pd.DataFrame:
     """Fetch revenue_metrics rows from the last N minutes that haven't been scored."""
     query = """
@@ -112,14 +104,10 @@ def score_metrics(model: xgb.XGBClassifier, df: pd.DataFrame) -> pd.DataFrame:
     df["region_enc"] = df["region"].map(REGION_MAP).fillna(-1).astype(int)
 
     # Vectorized expected revenue computation
-    df["base_revenue"] = df["category"].map(lambda c: CATEGORY_BASELINES.get(c, 300.0))
-    df["region_weight"] = df["region"].map(lambda r: REGION_WEIGHTS.get(r, 0.15))
-    df["hour_factor"] = df["hour"].apply(get_hour_factor)
-    df["dow_factor"] = df["day_of_week"].apply(get_dow_factor)
-    
-    df["expected_revenue"] = (
-        df["base_revenue"] * df["region_weight"] * df["hour_factor"] * df["dow_factor"]
-    ).round(2)
+    df["expected_revenue"] = df.apply(
+        lambda row: compute_expected_revenue(row["category"], row["region"], (row["hour"], row["day_of_week"])),
+        axis=1
+    )
     
     df["revenue_ratio"] = np.where(
         df["expected_revenue"] > 0,
@@ -264,8 +252,8 @@ def main() -> None:
             logger.error("Lost DB connection, waiting %ds before retry: %s", reconnect_backoff, db_err)
             try:
                 conn.close()
-            except Exception:
-                pass
+            except (psycopg2.Error, AttributeError):
+                pass  # Ignore errors during cleanup
             time.sleep(reconnect_backoff)
             try:
                 conn = get_single_connection()
@@ -275,8 +263,10 @@ def main() -> None:
                 logger.error("Reconnection failed: %s", reconnect_err)
                 # Exponential backoff with cap
                 reconnect_backoff = min(reconnect_backoff * 2, max_backoff)
+        except (psycopg2.Error, ValueError, KeyError) as e:
+            logger.error("Specific error during anomaly detection: %s", e)
         except Exception as e:
-            logger.error("Unexpected error: %s", e)
+            logger.error("Unexpected error during anomaly detection: %s", e)
 
         if _shutdown.wait(timeout=SCAN_INTERVAL):
             break
@@ -285,8 +275,8 @@ def main() -> None:
     logger.info("Closing database connection")
     try:
         conn.close()
-    except Exception:
-        pass
+    except (psycopg2.Error, AttributeError):
+        pass  # Ignore errors during cleanup
     logger.info("Anomaly detection service stopped after %d scans", scan_count)
 
 

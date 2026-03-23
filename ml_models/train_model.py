@@ -79,15 +79,26 @@ def train(X: pd.DataFrame, y: pd.Series) -> tuple[xgb.XGBClassifier, dict]:
         y_test, y_pred, average="binary",
     )
 
+    logger.info("Model training completed", extra={
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "test_samples": len(y_test),
+        "normal_samples": (y_test == 0).sum(),
+        "anomaly_samples": (y_test == 1).sum()
+    })
+    
+    # Print results for console visibility
     print("[EVAL] Test set results:")
     print(classification_report(y_test, y_pred, target_names=["normal", "anomaly"]))
-    logger.info("Precision: %.4f  Recall: %.4f  F1: %.4f", precision, recall, f1)
 
     # Feature importance
     importances = dict(zip(X.columns, model.feature_importances_))
-    logger.info("Feature importances:")
+    logger.info("Feature importances calculated", extra={"importances": importances})
+    
     for feat, imp in sorted(importances.items(), key=lambda x: -x[1]):
-        logger.info("  %s %.4f", feat, imp)
+        logger.info("Feature importance", extra={"feature": feat, "importance": imp})
+        print(f"  {feat}: {imp:.4f}")
 
     return model, {"precision": precision, "recall": recall, "f1": f1, "importances": importances}
 

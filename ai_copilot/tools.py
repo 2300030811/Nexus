@@ -16,6 +16,7 @@ from langchain_core.tools import tool
 from common.logging_utils import get_logger
 from common.db_utils import get_connection_pool
 from common.cache import _cache
+from common.features import calculate_trend_pct
 
 logger = get_logger("nexus.copilot.tools")
 
@@ -55,14 +56,7 @@ def _derive_revenue_trend(revenue_last_15m: float, revenue_last_60m: float, stor
     """Prefer the stored trend when present, otherwise derive it from 15m vs 60m momentum."""
     if stored_trend not in (None, 0, 0.0):
         return float(stored_trend)
-    revenue_last_60m = float(revenue_last_60m or 0.0)
-    revenue_last_15m = float(revenue_last_15m or 0.0)
-    if revenue_last_60m <= 0:
-        return 0.0
-    baseline_quarter_hour = revenue_last_60m / 4.0
-    if baseline_quarter_hour <= 0:
-        return 0.0
-    return round(revenue_last_15m / baseline_quarter_hour, 4)
+    return calculate_trend_pct(float(revenue_last_15m or 0.0), float(revenue_last_60m or 0.0) / 4.0)
 
 
 # ---------------------------------------------------------------------------

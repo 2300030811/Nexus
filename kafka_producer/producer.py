@@ -69,7 +69,7 @@ def create_producer(broker: str, retries: int = 10, delay: int = 5) -> KafkaProd
                 max_in_flight_requests_per_connection=1,  # Preserve ordering during retries
                 batch_size=32768,                         # 32KB batches
                 linger_ms=20,                             # Higher linger for better batching
-                compression_type="lz4",                   # Efficient compression for JSON
+                compression_type="gzip",                   # Efficient compression for JSON
             )
             logger.info("Connected to Kafka broker at %s", broker)
             return producer
@@ -158,6 +158,23 @@ def generate_order_event(simulate_stockout: bool = False) -> dict:
     }
 
 
+def validate_event(event: dict) -> bool:
+    """Check if the event contains all required fields and valid data types."""
+    required = {
+        "schema_version", "event_id", "event_type", "timestamp", "order_id",
+        "product_id", "product_name", "category", "quantity", "unit_price",
+        "total_amount", "region", "payment_method"
+    }
+    missing = required - set(event.keys())
+    if missing:
+        logger.error("Event validation failed: missing fields %s", missing)
+        return False
+    if event["quantity"] <= 0:
+        logger.error("Event validation failed: quantity must be positive")
+        return False
+    return True
+
+
 def make_error_handler(captured_event, dlq):
     """Factory to create an error handler that captures the current event."""
     def on_error(excp):
@@ -192,6 +209,9 @@ def main() -> None:
                     logger.info("Simulation active: High-value Electronics stockout")
 
             event = generate_order_event(simulate_stockout)
+            if not validate_event(event):
+                PRODUCE_ERRORS.inc()
+                continue
             # Set message key to region for partition ordering
             event_key = event["region"].encode("utf-8")
             

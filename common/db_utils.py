@@ -20,43 +20,59 @@ def get_db_config() -> dict:
     return db
 
 
-_connection_pool: Optional[pool.ThreadedConnectionPool] = None
+class Database:
+    """Explicitly owned database connection pool."""
+    def __init__(self, minconn: int = 1, maxconn: int = 10):
+        self._config = get_db_config()
+        self._pool = None
+        self._minconn = minconn
+        self._maxconn = maxconn
+        self.initialize_pool()
 
-
-def get_connection_pool(minconn: int = 1, maxconn: int = 10) -> pool.ThreadedConnectionPool:
-    """
-    Get or create a threaded connection pool with retry logic.
-    """
-    global _connection_pool
-    if _connection_pool is None:
-        config = get_db_config()
+    def initialize_pool(self):
         attempts = 3
         last_err = None
-        
         for i in range(attempts):
             try:
-                _connection_pool = pool.ThreadedConnectionPool(
-                    minconn=minconn,
-                    maxconn=maxconn,
-                    **config
+                self._pool = pool.ThreadedConnectionPool(
+                    minconn=self._minconn,
+                    maxconn=self._maxconn,
+                    **self._config
                 )
-                return _connection_pool
+                return
             except Exception as e:
                 last_err = e
                 if i < attempts - 1:
-                    time.sleep(2)  # Wait before retry
-                    
+                    time.sleep(2)
         raise RuntimeError(f"Failed to create DB pool after {attempts} attempts: {last_err}")
-    return _connection_pool
+
+    def get_conn(self):
+        if not self._pool: self.initialize_pool()
+        return self._pool.getconn()
+
+    def put_conn(self, conn, close: bool = False):
+        if self._pool: self._pool.putconn(conn, close=close)
+
+    def close(self):
+        if self._pool:
+            self._pool.closeall()
+            self._pool = None
+
+
+_default_db = None
+
+
+def get_connection_pool(minconn: int = 1, maxconn: int = 10) -> pool.ThreadedConnectionPool:
+    """Compatibility wrapper for the global shared pool."""
+    global _default_db
+    if _default_db is None:
+        _default_db = Database(minconn=minconn, maxconn=maxconn)
+    return _default_db._pool
 
 
 def get_single_connection():
-    """
-    Create a single database connection (no pooling).
-    Use this for simple single-threaded services (e.g., producer, ML services).
-    """
-    config = get_db_config()
-    return psycopg2.connect(**config)
+    """Create a single database connection (no pooling)."""
+    return psycopg2.connect(**get_db_config())
 
 
 def close_connection(conn) -> None:
@@ -69,8 +85,8 @@ def close_connection(conn) -> None:
 
 
 def close_connection_pool() -> None:
-    """Close all connections in the global pool."""
-    global _connection_pool
-    if _connection_pool:
-        _connection_pool.closeall()
-        _connection_pool = None
+    """Close the default database pool."""
+    global _default_db
+    if _default_db:
+        _default_db.close()
+        _default_db = None

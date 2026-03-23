@@ -7,6 +7,10 @@ Writes drift scores to a new DB table for dashboard visibility.
 
 import os
 import json
+import os
+import json
+import argparse
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -189,15 +193,33 @@ def log_drift(conn, window_hours: int, metrics: dict):
         )
 
 
-def run_once():
+def run_once(auto_retrain: bool = False):
     conn = get_single_connection()
     try:
         metrics = compute_drift(conn, window_hours=24)
         log_drift(conn, 24, metrics)
+        
+        if metrics and metrics.get("drift_flag") and auto_retrain:
+            logger.info("Drift detected and auto-retrain enabled. Triggering retraining...")
+            try:
+                subprocess.run(
+                    ["python", "ml_models/retrain_production_model.py", "--days", "30", "--min-samples", "1000"],
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+                logger.info("Auto-retraining triggered successfully.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Auto-retraining failed: {e.stderr}")
+                
     finally:
         close_connection(conn)
     return metrics
 
 
 if __name__ == "__main__":
-    run_once()
+    parser = argparse.ArgumentParser(description="Nexus Drift Monitor")
+    parser.add_argument("--auto-retrain", action="store_true", help="Automatically trigger model retraining if drift is detected")
+    args = parser.parse_args()
+    
+    run_once(auto_retrain=args.auto_retrain)

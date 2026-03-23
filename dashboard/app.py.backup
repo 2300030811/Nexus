@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 from common.db_utils import get_db_config, get_connection_pool
 import requests
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 API_KEY = os.getenv("API_KEY", "dev-api-key")
 
 def api_call(method: str, endpoint: str, params: dict = None, json_data: dict = None) -> dict | list:
@@ -134,25 +134,16 @@ def load_system_health() -> dict:
     """Load system health metrics via API."""
     data = api_call("GET", "/metrics/health")
     if not isinstance(data, dict):
-        data = {}
-    
-    # Ensure all required keys exist with defaults
-    result = {
-        "epm": data.get("epm", 0),
-        "latency": data.get("latency", 0.0),
-        "last_pred": data.get("last_pred"),
-        "kafka_connected": data.get("kafka_connected", False),
-        "kafka_stalled": data.get("kafka_stalled", False),
-    }
+        return {"epm": 0, "latency": 0.0, "last_pred": None, "kafka_connected": False, "kafka_stalled": False}
     
     # Convert last_pred string to datetime
-    if result["last_pred"]:
+    if data.get("last_pred"):
         try:
-            result["last_pred"] = datetime.fromisoformat(result["last_pred"])
+            data["last_pred"] = datetime.fromisoformat(data["last_pred"])
         except (ValueError, TypeError):
             pass
     
-    return result
+    return data
 
 
 def load_revenue_trend(minutes: int) -> pd.DataFrame:
